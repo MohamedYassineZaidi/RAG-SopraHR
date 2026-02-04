@@ -1,0 +1,60 @@
+# ===============================
+# Python / Virtual Environment
+# ===============================
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# ===============================
+# OS / Editor junk
+# ===============================
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# ===============================
+# Logs & temp files
+# ===============================
+*.log
+*.tmp
+*.bak
+*.swp
+
+# ===============================
+# Data directories (generated / heavy)
+# ===============================
+data/raw/
+data/output/
+output/
+
+# ===============================
+# Generated documents
+# ===============================
+*.pdf
+*.html
+
+# ===============================
+# Large / derived datasets
+# (keep only if you explicitly want versioned)
+# ===============================
+*.csv
+*.xlsx
+
+# ===============================
+# Model / embedding artifacts (future-proof)
+# ===============================
+*.bin
+*.pt
+*.onnx
+*.faiss
+*.index
+
+# ===============================
+# Secrets & config
+# ===============================
+.env
+.env.*

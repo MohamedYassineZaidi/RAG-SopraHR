@@ -1,0 +1,25 @@
+body {
+    font-family: "DejaVu Serif", serif;
+    margin: 2cm;
+}
+
+h1, h2, h3 {
+    color: #1a1a1a;
+}
+
+@page {
+    size: A4;
+    margin: 2cm;
+
+    @top-center {
+        content: "Sopra HR — Ticket Archive (Minimal Edition)";
+        font-size: 10pt;
+        color: #555;
+    }
+
+    @bottom-center {
+        content: "Page " counter(page) " of " counter(pages);
+        font-size: 9pt;
+        color: #777;
+    }
+}
