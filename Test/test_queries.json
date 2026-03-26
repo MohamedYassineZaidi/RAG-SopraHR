@@ -1,0 +1,244 @@
+{
+  "eval_items": [
+    {
+      "id": "DSN-01",
+      "team": "DSN",
+      "question": "Lors du lancement de REGDSN pour un établissement, j'obtiens l'erreur ORA-00942 Table ou vue inexistante. Que faire ?",
+      "expected_ticket_ref": "FR W210006",
+      "expected_answer": "REGDSN : erreur établissement à l'exécution",
+      "note": "error code based query"
+    },
+    {
+      "id": "DSN-02",
+      "team": "DSN",
+      "question": "Suite à la mise en production du kit DSN 2.1, les valeurs produites par la bande DUCS sont incorrectes. Le montant ne correspond pas à ce qui est attendu.",
+      "expected_ticket_ref": "FR W210500",
+      "expected_answer": "Bande DSN (DUCS) incorrecte",
+      "note": "description based"
+    },
+    {
+      "id": "DSN-03",
+      "team": "DSN",
+      "question": "Nous avons le kit DSN 3.0 en production. Pouvez-vous nous livrer le kit DSN 3.1 ?",
+      "expected_ticket_ref": "FR W211797",
+      "expected_answer": "Kit DSN 3.1",
+      "note": "kit delivery request"
+    },
+    {
+      "id": "DSN-04",
+      "team": "DSN",
+      "question": "Je veux télécharger la mise à jour DSN VAL mais au lieu d'un fichier .kar je récupère un .zip. Est-ce normal ?",
+      "expected_ticket_ref": "FR W214535",
+      "expected_answer": "Téléchargement version DSN VAL",
+      "note": "download issue"
+    },
+    {
+      "id": "DSN-05",
+      "team": "DSN",
+      "question": "L'espace DSN n'est plus accessible depuis ce matin. Les tentatives de redémarrage restent sans effet.",
+      "expected_ticket_ref": "FR W215489",
+      "expected_answer": "Espace DSN KO et ne redémarre plus",
+      "note": "service down"
+    },
+    {
+      "id": "DSN-06",
+      "team": "DSN",
+      "question": "Le kit DSN 3.1 permet de paramétrer le versement URSSAF en mode télérèglement. Dans quelle documentation peut-on trouver les informations de paramétrage ?",
+      "expected_ticket_ref": "FR W213452",
+      "expected_answer": "DSN 3.1 : Téléréglement",
+      "note": "documentation request"
+    },
+    {
+      "id": "DSN-07",
+      "team": "DSN",
+      "question": "La nouvelle structure ZZ de la DSN 3.1.0 concerne-t-elle les événements pour la déclaration de fin d'année ?",
+      "expected_ticket_ref": "FR W211287",
+      "expected_answer": "DSN 3.1.0 et suivantes",
+      "note": "technical question"
+    },
+    {
+      "id": "DSN-08",
+      "team": "DSN",
+      "question": "La table dsnEventInfo ne contient pas la colonne PeriodeDSN ce qui empêche son partitionnement. Comment corriger ce DDL ?",
+      "expected_ticket_ref": "FR W211415",
+      "expected_answer": "DDL de dsnEventInfo sans colonne PeriodeDSN",
+      "note": "SQL/DDL issue"
+    },
+    {
+      "id": "DSN-09",
+      "team": "DSN",
+      "question": "Dans le fichier Entites list du patch DSN 3.0, des noeuds ABN4 semblent manquants. Est-ce une erreur dans le kit ?",
+      "expected_ticket_ref": "FR W214176",
+      "expected_answer": "DSN 3.0 : Noeuds ABN4 manquants",
+      "note": "kit content issue"
+    },
+    {
+      "id": "DSN-10",
+      "team": "DSN",
+      "question": "REGDSN renvoie l'erreur Pas d'entreprise pour certains établissements. Leur SIREN est différent de celui du siège social.",
+      "expected_ticket_ref": "FR W213072",
+      "expected_answer": "Erreur REGDSN établissement SIREN différent",
+      "note": "SIREN configuration"
+    },
+    {
+      "id": "Appli-11",
+      "team": "Appli",
+      "question": "Après intégration d'un patch, la validation extrinsèque de la page FSWDRE01 échoue avec l'erreur E-312 : la rubrique ZDAG-COMMO n'existe pas dans le contexte des pages Web.",
+      "expected_ticket_ref": "FR W210000",
+      "expected_answer": "Page FSWDRE01 — rubrique ZDAG-COMMO manquante",
+      "note": "Design Center validation error"
+    },
+    {
+      "id": "Appli-12",
+      "team": "Appli",
+      "question": "Nous reprenons des salariés avec des droits à congés existants. Comment saisir dans HR Access ce cas avec le nouveau module CP ?",
+      "expected_ticket_ref": "FR W212191",
+      "expected_answer": "Prise de congés immédiate pour salarié repris",
+      "note": "congés payés"
+    },
+    {
+      "id": "Appli-13",
+      "team": "Appli",
+      "question": "Depuis la mise en place du rappel général sur 1 mois, nous constatons des rappels intempestifs sur des salariés déjà sortis. Comment corriger ce comportement ?",
+      "expected_ticket_ref": "FR W212142",
+      "expected_answer": "Rappel intempestif sur salarié sorti",
+      "note": "paie anomalie"
+    },
+    {
+      "id": "Appli-14",
+      "team": "Appli",
+      "question": "Le traitement BAYSDV copie YSC3 dans YSK7 pour les bordereaux de remontée de paie mais les valeurs sont incorrectes. Comment diagnostiquer ce problème ?",
+      "expected_ticket_ref": "FR W210896",
+      "expected_answer": "Mise à jour ZYDV en remontée de paie erronée",
+      "note": "remontée de paie"
+    },
+    {
+      "id": "Appli-15",
+      "team": "Appli",
+      "question": "Un dossier n'est pas sélectionné dans la production de l'AED X10 alors qu'il devrait l'être. Comment identifier la cause ?",
+      "expected_ticket_ref": "FR W210940",
+      "expected_answer": "AED X10 : dossier non sélectionné dans FFT",
+      "note": "AED selection issue"
+    },
+    {
+      "id": "Appli-16",
+      "team": "Appli",
+      "question": "Dans l'info ZX6K lors de la paie d'acompte, des ZY93 apparaissent en annulation pour les salariés ayant un EV commentaire. D'où vient ce problème ?",
+      "expected_ticket_ref": "FR W217088",
+      "expected_answer": "ZY93 prise en compte lors de la paie d'acompte",
+      "note": "paie acompte"
+    },
+    {
+      "id": "Appli-17",
+      "team": "Appli",
+      "question": "Lors de l'installation du kit KTFRREGDSN_31, le guide demande de rattacher des infos au processus AS907 mais ce processus n'existe pas dans notre environnement.",
+      "expected_ticket_ref": "FR W213907",
+      "expected_answer": "Kit KTFRREGDSN_31 — processus AS907 absent",
+      "note": "kit installation"
+    },
+    {
+      "id": "Appli-18",
+      "team": "Appli",
+      "question": "Pouvons-nous recevoir en mode TEST les patches concernant la nouvelle information Nomina Retenciones judiciales ?",
+      "expected_ticket_ref": "FR W216392",
+      "expected_answer": "Demande kit Nomina Retenciones judiciales",
+      "note": "kit request Spain"
+    },
+    {
+      "id": "Appli-19",
+      "team": "Appli",
+      "question": "Pouvez-vous mettre à disposition la version 3.0.10 du kit DSN Applicatif ?",
+      "expected_ticket_ref": "FR W210258",
+      "expected_answer": "DSN Phase 3 — demande kit 3.0.10",
+      "note": "kit delivery"
+    },
+    {
+      "id": "Appli-20",
+      "team": "Appli",
+      "question": "Le CPF remplace le DIF. Y a-t-il des patches disponibles relatifs au CPF dans HR Access ?",
+      "expected_ticket_ref": "FR W210001",
+      "expected_answer": "Compte Personnel de Formation (CPF)",
+      "note": "CPF DIF patches"
+    },
+    {
+      "id": "Outils-21",
+      "team": "Outils",
+      "question": "Lors de l'enregistrement en brouillon dans un GP, nous obtenons une erreur système R_SYSTEM_ERROR. Aucun autre diagnostic disponible.",
+      "expected_ticket_ref": "FR W213072",
+      "expected_answer": "Erreur R_SYSTEM_ERROR dans un GP",
+      "note": "system error GP"
+    },
+    {
+      "id": "Outils-22",
+      "team": "Outils",
+      "question": "Dans notre environnement de référence, impossible d'accéder à HRCT. Un message d'erreur sur la longueur du dictionnaire se déclenche et bloque l'accès.",
+      "expected_ticket_ref": "FR W218020",
+      "expected_answer": "HRCT : problème d'accès, message d'erreur bloquant",
+      "note": "HRCT access error"
+    },
+    {
+      "id": "Outils-23",
+      "team": "Outils",
+      "question": "Une anomalie apparaît lors de l'utilisation du service génération automatique annuelle dans HRCT. La génération ne se termine pas correctement.",
+      "expected_ticket_ref": "FR W215047",
+      "expected_answer": "Génération des objets de paie — HRCT Service",
+      "note": "HRCT service bug"
+    },
+    {
+      "id": "Outils-24",
+      "team": "Outils",
+      "question": "Une exploration NBX sur le code demande ZB1 renvoie une erreur Fin anormale à la ligne 133 sans autre diagnostic. Comment analyser cette log ?",
+      "expected_ticket_ref": "FR W216928",
+      "expected_answer": "Anomalie programme BL3 sans diagnostic exploitable",
+      "note": "BL3 programme error"
+    },
+    {
+      "id": "Outils-25",
+      "team": "Outils",
+      "question": "Pourriez-vous nous livrer le patch 181397 pour notre environnement ?",
+      "expected_ticket_ref": "FR W214171",
+      "expected_answer": "Demande patch 181397",
+      "note": "patch delivery request"
+    },
+    {
+      "id": "Outils-26",
+      "team": "Outils",
+      "question": "Mon client utilise l'information ZYFJ pour les remboursements IJSS. Des montants négatifs apparaissent dans les bordereaux. Comment corriger ce comportement ?",
+      "expected_ticket_ref": "FR W216747",
+      "expected_answer": "ZYFJ — montants négatifs",
+      "note": "ZYFJ negative amounts"
+    },
+    {
+      "id": "Outils-27",
+      "team": "Outils",
+      "question": "Lors de nos tests de compatibilité HR 7.30.60 avec IE11, nous avons détecté 3 anomalies. Comment les corriger ?",
+      "expected_ticket_ref": "FR W213566",
+      "expected_answer": "Compatibilité HR 7.30.60 et IE11",
+      "note": "browser compatibility"
+    },
+    {
+      "id": "Outils-28",
+      "team": "Outils",
+      "question": "Depuis hier nous avons un problème de connexion sur HR Access. Les services ne redémarrent pas correctement.",
+      "expected_ticket_ref": "FR W217235",
+      "expected_answer": "Problème de connexion et démarrage service",
+      "note": "connection / service restart"
+    },
+    {
+      "id": "Outils-29",
+      "team": "Outils",
+      "question": "Lors du lancement des bordereaux par NRB pour mettre à jour les absences, nous obtenons l'erreur FS00BBMK-BBAD0061 — Agrandissement de la table des mouvements CO40/CO41 nécessaire.",
+      "expected_ticket_ref": "FR W210005",
+      "expected_answer": "Impossible de mettre à jour les dossiers par NRB",
+      "note": "NRB table overflow"
+    },
+    {
+      "id": "Outils-30",
+      "team": "Outils",
+      "question": "Après subg0 et suppression des fichiers locaux du Design Center, la validation extrinsèque d'une page échoue avec des erreurs E-312 et W-330.",
+      "expected_ticket_ref": "FR W210003",
+      "expected_answer": "Erreur Design Center validation extrinsèque",
+      "note": "Design Center validation"
+    }
+  ]
+}

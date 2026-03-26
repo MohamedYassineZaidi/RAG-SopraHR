@@ -25,32 +25,57 @@ Thumbs.db
 *.swp
 
 # ===============================
-# Data directories (generated / heavy)
+# Data folder: keep structure, ignore all contents
 # ===============================
-data/raw/
-data/output/
-output/
 
-# ===============================
-# Generated documents
-# ===============================
+# Files directly in data/
+data/*.json
+data/*.csv
+data/*.xlsx
+data/Code Produit.xlsx
+data/tickets_index.csv
 *.pdf
 *.html
 
-# ===============================
-# Large / derived datasets
-# (keep only if you explicitly want versioned)
-# ===============================
-*.csv
-*.xlsx
+# Raw tickets (root-level, fully ignored)
+tickets/
+
+# Subfolder contents
+data/raw/*
+data/json/*
+data/analysis_json/*
+data/analysis_pdf/*
+data/output/*
+data/pageindex/*
+data/faiss_db/*
+
+# BM25 subfolders (ignore contents, keep subdirs)
+data/bm25/*
+!data/bm25/appli/
+!data/bm25/dsn/
+!data/bm25/outils/
+data/bm25/appli/*
+data/bm25/dsn/*
+data/bm25/outils/*
+
+# Vector index subfolders (ignore contents, keep subdirs)
+data/indexes/*
+!data/indexes/appli/
+!data/indexes/dsn/
+!data/indexes/outils/
+data/indexes/appli/*
+data/indexes/dsn/*
+data/indexes/outils/*
+
+# Keep .gitkeep placeholders so empty folders are tracked
+!**/.gitkeep
 
 # ===============================
-# Model / embedding artifacts (future-proof)
+# Model / embedding artifacts
 # ===============================
 *.bin
 *.pt
 *.onnx
-*.faiss
 *.index
 
 # ===============================
