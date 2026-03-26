@@ -1,0 +1,27 @@
+# Vector search
+faiss-cpu
+sentence-transformers
+numpy
+
+# BM25 retrieval
+rank-bm25
+
+# AWS Bedrock / S3
+boto3
+
+# Mistral (OpenAI-compatible API)
+openai
+
+# PDF generation
+reportlab
+
+# Import checks / browser stack
+PyMuPDF
+greenlet
+playwright
+
+# Token counting
+tiktoken
+
+# Environment variables
+python-dotenv
