@@ -43,6 +43,7 @@ tickets/
 # Subfolder contents
 data/raw/*
 data/json/*
+data/cleaned/*
 data/analysis_json/*
 data/analysis_pdf/*
 data/output/*
@@ -69,6 +70,13 @@ data/indexes/outils/*
 
 # Keep .gitkeep placeholders so empty folders are tracked
 !**/.gitkeep
+
+# ===============================
+# Generated evaluation output
+# ===============================
+output/*.json
+output/*.log
+!output/eval_set.json
 
 # ===============================
 # Model / embedding artifacts

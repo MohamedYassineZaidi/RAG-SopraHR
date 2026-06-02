@@ -96,11 +96,40 @@ def call_bedrock(client, prompt: str, max_tokens: int = 1024) -> str:
 # 2. TICKET → EMBEDDABLE TEXT
 # ─────────────────────────────────────────────
 
+def _extract_conversation_text(ticket: dict, max_chars: int = 1500) -> str:
+    """
+    Extracts searchable text from the conversation field.
+    Critical: error codes (E-312), page names (FSWDRE01), field references
+    (ZDAG-COMMO) often appear in client follow-ups and support replies that
+    are NOT in the description or resolution. Without this, those tokens
+    are invisible to retrieval.
+    """
+    conv = ticket.get("conversation") or []
+    if not conv:
+        return ""
+    pieces = []
+    for entry in conv:
+        text = entry.get("text") or ""
+        if not text:
+            continue
+        # Skip pure status-change / archive messages
+        if entry.get("type") in ("status_change", "archive"):
+            continue
+        if len(text) < 20:
+            continue
+        pieces.append(text)
+    joined = "\n".join(pieces)
+    if len(joined) > max_chars:
+        joined = joined[:max_chars]
+    return joined
+
+
 def ticket_to_embed_text(ticket: dict) -> str:
     """
     Builds the text we embed for each ticket.
-    Combines title + description + resolution so the vector
-    captures both the problem AND the solution.
+    Combines title + description + resolution + conversation so the vector
+    captures the problem, the solution, AND any technical terms that only
+    appear in client follow-ups (error codes, page names, rubrique names).
     """
     parts = []
 
@@ -109,13 +138,29 @@ def ticket_to_embed_text(ticket: dict) -> str:
     if ticket.get("version"):
         parts.append(f"Version: {ticket['version']}")
     if ticket.get("description"):
-        parts.append(f"Problème: {ticket['description'][:500]}")
+        parts.append(f"Problème: {ticket['description'][:600]}")
     if ticket.get("resolution"):
-        parts.append(f"Résolution: {ticket['resolution'][:400]}")
+        parts.append(f"Résolution: {ticket['resolution'][:800]}")
     if ticket.get("patches"):
         parts.append(f"Patches: {', '.join(ticket['patches'])}")
+    if ticket.get("espdsn_version"):
+        parts.append(f"ESPDSN: {ticket['espdsn_version']}")
+    # NEW: Include conversation excerpts so error codes / module names
+    # mentioned mid-conversation become searchable
+    conv_text = _extract_conversation_text(ticket, max_chars=1500)
+    if conv_text:
+        parts.append(f"Échanges: {conv_text}")
 
     return "\n".join(parts)
+
+
+def _extract_last_date(ticket: dict) -> str:
+    """Extract the most recent timestamp from the ticket's conversation."""
+    conversation = ticket.get("conversation", [])
+    dates = [entry.get("timestamp", "") for entry in conversation if entry.get("timestamp")]
+    if dates:
+        return max(dates)  # ISO format strings sort lexicographically
+    return ""
 
 
 def ticket_to_display(ticket: dict) -> dict:
@@ -131,6 +176,8 @@ def ticket_to_display(ticket: dict) -> dict:
         "status":      ticket.get("closing_status_code", ""),
         "status_desc": ticket.get("closing_status_explanation", ""),
         "team":        ticket.get("support_team", ""),
+        "last_date":   _extract_last_date(ticket),
+        "espdsn_version": ticket.get("espdsn_version", ""),
     }
 
 
@@ -146,8 +193,8 @@ def save_team_index(db_dir: Path, team: str, index, docstore: list):
     p = index_path(db_dir, team)
     p.mkdir(parents=True, exist_ok=True)
     faiss.write_index(index, str(p / "index.faiss"))
-    with open(p / "docstore.pkl", "wb") as f:
-        pickle.dump(docstore, f)
+    with open(p / "docstore.json", "w") as f:
+        json.dump(docstore, f, ensure_ascii=False, indent=2)
     with open(p / "config.json", "w") as f:
         json.dump({"team": team, "model": EMBEDDING_MODEL, "count": len(docstore)}, f)
 
@@ -160,8 +207,8 @@ def load_team_index(db_dir: Path, team: str):
             f"Run: python rag_assistant.py index --json <json_dir> --db {db_dir}"
         )
     index = faiss.read_index(str(p / "index.faiss"))
-    with open(p / "docstore.pkl", "rb") as f:
-        docstore = pickle.load(f)
+    with open(p / "docstore.json") as f:
+        docstore = json.load(f)
     with open(p / "config.json") as f:
         config = json.load(f)
     return index, docstore, config
@@ -175,6 +222,7 @@ def build_indexes(json_dir: Path, db_dir: Path, batch_size: int = 256):
     """
     Reads all JSON tickets, groups by team, embeds each group,
     builds one FAISS index per team.
+    Incremental: loads existing index and only embeds new tickets.
     """
     json_files = sorted(json_dir.glob("*.json"))
     print(f"\n📂 Found {len(json_files)} JSON tickets")
@@ -199,9 +247,7 @@ def build_indexes(json_dir: Path, db_dir: Path, batch_size: int = 256):
         if tickets:
             print(f"    {team:10s} {len(tickets):5d} tickets")
 
-    print(f"\n🧠 Loading embedding model: {EMBEDDING_MODEL}")
-    print(f"   (First run downloads ~400MB)\n")
-    model = SentenceTransformer(EMBEDDING_MODEL)
+    model = None  # lazy load only if needed
 
     # Build one index per team (skip Unknown)
     for team in TEAMS:
@@ -210,12 +256,37 @@ def build_indexes(json_dir: Path, db_dir: Path, batch_size: int = 256):
             print(f"⚠️  No tickets for team {team} — skipping")
             continue
 
-        print(f"\n{'─'*50}")
-        print(f"📌 Indexing team: {team} ({len(tickets)} tickets)")
+        # --- Incremental: load existing index and detect new tickets ---
+        existing_refs = set()
+        existing_index = None
+        existing_docstore = []
+        p = index_path(db_dir, team)
+        if (p / "index.faiss").exists():
+            try:
+                existing_index, existing_docstore, _ = load_team_index(db_dir, team)
+                existing_refs = {d.get("reference", "") for d in existing_docstore}
+                print(f"\n📌 Team {team}: loaded existing index with {len(existing_docstore)} tickets")
+            except Exception as e:
+                print(f"  ⚠️  Could not load existing {team} index ({e}), rebuilding fully")
 
-        # Build docstore and embed texts
-        docstore = [ticket_to_display(t) for t in tickets]
-        texts    = [ticket_to_embed_text(t) for t in tickets]
+        new_tickets = [t for t in tickets if t.get("reference", "") not in existing_refs]
+
+        if not new_tickets:
+            print(f"  ✅ {team}: no new tickets, index is up-to-date")
+            continue
+
+        print(f"\n{'─'*50}")
+        print(f"📌 Indexing team: {team} ({len(new_tickets)} new / {len(tickets)} total)")
+
+        # Lazy-load embedding model
+        if model is None:
+            print(f"\n🧠 Loading embedding model: {EMBEDDING_MODEL}")
+            print(f"   (First run downloads ~400MB)\n")
+            model = SentenceTransformer(EMBEDDING_MODEL)
+
+        # Build docstore and embed texts for NEW tickets only
+        new_docstore = [ticket_to_display(t) for t in new_tickets]
+        texts        = [ticket_to_embed_text(t) for t in new_tickets]
 
         # Embed in batches
         all_embeddings = []
@@ -230,14 +301,21 @@ def build_indexes(json_dir: Path, db_dir: Path, batch_size: int = 256):
             batch_num = i // batch_size + 1
             print(f"  Batch {batch_num:3d}/{total_batches} — {min(i+batch_size, len(texts))}/{len(texts)}")
 
-        matrix = np.vstack(all_embeddings).astype("float32")
+        new_matrix = np.vstack(all_embeddings).astype("float32")
 
-        # IndexFlatIP = exact cosine similarity (vectors are L2-normalized)
-        index = faiss.IndexFlatIP(EMBEDDING_DIM)
-        index.add(matrix)
+        # Merge with existing index or create new one
+        if existing_index is not None:
+            existing_index.add(new_matrix)
+            merged_index    = existing_index
+            merged_docstore = existing_docstore + new_docstore
+        else:
+            merged_index = faiss.IndexFlatIP(EMBEDDING_DIM)
+            merged_index.add(new_matrix)
+            merged_docstore = new_docstore
 
-        save_team_index(db_dir, team, index, docstore)
-        print(f"  ✅ Saved {team} index → {index_path(db_dir, team)}")
+        save_team_index(db_dir, team, merged_index, merged_docstore)
+        print(f"  ✅ Saved {team} index → {index_path(db_dir, team)}  "
+              f"({len(merged_docstore)} total, {len(new_docstore)} added)")
 
     print(f"\n🎉 All indexes built. Run queries with:")
     print(f"   python rag_assistant.py query --db {db_dir} --team DSN")

@@ -50,7 +50,35 @@ def parse_frontmatter(text: str) -> tuple[dict, str]:
 
 
 # ─────────────────────────────────────────────
-# 2. TAB-SEPARATED DATA LINE PARSER
+# 2a. SECTION-BASED BODY PARSER
+# ─────────────────────────────────────────────
+
+def parse_structured_body(body: str) -> tuple[str, str]:
+    """
+    Parses bodies that use [DESCRIPTION] / [RESOLUTION] / [CONVERSATION] section markers.
+    Returns (description_text, thread_text).
+    The [CONVERSATION] section starts with a tab-separated data line which is skipped.
+    """
+    desc_match = re.search(
+        r'\[DESCRIPTION\]\s*\n(.*?)(?=\[RESOLUTION\]|\[CONVERSATION\]|\Z)',
+        body, re.DOTALL
+    )
+    description = desc_match.group(1).strip() if desc_match else ''
+
+    conv_match = re.search(r'\[CONVERSATION\]\s*\n(.*)', body, re.DOTALL)
+    if conv_match:
+        thread_raw = conv_match.group(1)
+        lines = thread_raw.split('\n')
+        # First line is a tab-separated data row — skip it
+        thread_text = '\n'.join(lines[1:]) if lines and '\t' in lines[0] else thread_raw
+    else:
+        thread_text = body
+
+    return description, thread_text
+
+
+# ─────────────────────────────────────────────
+# 2b. TAB-SEPARATED DATA LINE PARSER
 # ─────────────────────────────────────────────
 
 def parse_data_line(body: str) -> tuple[dict, str]:
@@ -283,8 +311,13 @@ def parse_ticket(filepath: str) -> dict:
     # Step 1: frontmatter
     metadata, body = parse_frontmatter(raw_text)
 
-    # Step 2: data line
-    data_fields, thread_text = parse_data_line(body)
+    # Step 2: parse body — section-based format or raw tab-separated format
+    if '[DESCRIPTION]' in body:
+        description, thread_text = parse_structured_body(body)
+        data_fields = {}
+    else:
+        data_fields, thread_text = parse_data_line(body)
+        description = data_fields.get('description_clean', '')
 
     # Step 3: conversation thread
     events = parse_thread(thread_text)
@@ -312,7 +345,7 @@ def parse_ticket(filepath: str) -> dict:
         'team_source': metadata.get('team_source', ''),
 
         # Problem
-        'description': data_fields.get('description_clean', ''),
+        'description': description,
 
         # Resolution (KEY FIELD for RAG)
         'resolution': resolution,

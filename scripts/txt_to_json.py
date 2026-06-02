@@ -44,6 +44,14 @@ STATUS_LINE_RE = re.compile(
 SEPARATOR_RE = re.compile(r'^_{10,}$')
 SECTION_RE   = re.compile(r'^\[(DESCRIPTION|RESOLUTION|CONVERSATION)\]$')
 
+_PATCH_RE = re.compile(
+    r'(?:patch|correctif|livraison)\s*(?:n[°o]?\s*)?(\d{5,6})',
+    re.IGNORECASE
+)
+_PATCH_CODE_RE = re.compile(r'\b(ZY\w{4,}|ZX\w{4,})\b', re.IGNORECASE)
+
+_STATUS_CLOSED = {"CA","CN","CP","CH","CU","C2","MC","CO","CS","CT","CX","CY","CZ","CQ","CV","CR"}
+
 
 # ─────────────────────────────────────────────
 # FRONTMATTER PARSER
@@ -250,6 +258,24 @@ def _extract_author(text: str) -> str:
 
 
 # ─────────────────────────────────────────────
+# ESPDSN VERSION EXTRACTION
+# ─────────────────────────────────────────────
+
+# Matches "ESPDSN:3HR", "ESPDSN - 10PL", "ESPDSN:12HR", "ESPDSN - 3PL" etc.
+_ESPDSN_RE = re.compile(r'ESPDSN[\s:*\-]+(\d{1,2}(?:HR|PL))', re.IGNORECASE)
+
+
+def _extract_espdsn_version(conv_text: str) -> str:
+    """Extract the latest (highest) ESPDSN version from conversation text."""
+    matches = _ESPDSN_RE.findall(conv_text)
+    if not matches:
+        return ""
+    # Normalize and deduplicate
+    versions = sorted(set(m.upper() for m in matches), key=lambda v: (int(re.match(r'\d+', v).group()), v), reverse=True)
+    return versions[0]  # highest version number
+
+
+# ─────────────────────────────────────────────
 # MAIN CONVERTER
 # ─────────────────────────────────────────────
 
@@ -272,7 +298,22 @@ def txt_to_json(txt_path: Path) -> dict:
     patches_raw = meta.get('patches', '')
     patches = [p.strip() for p in patches_raw.split(';') if p.strip()]
 
-    # 5. Assemble final JSON
+    # 4b. Extract patch numbers mentioned in resolution/conversation text
+    all_text = sections['RESOLUTION'] + '\n' + sections['CONVERSATION']
+    found_patches = _PATCH_RE.findall(all_text)
+    found_codes = _PATCH_CODE_RE.findall(all_text)
+    # Merge with frontmatter patches, deduplicate
+    all_patches = list(dict.fromkeys(
+        patches + found_patches + [c.upper() for c in found_codes]
+    ))
+
+    # 5. Derived fields
+    site_env_parts = meta.get('site_env', '').split('*')
+    client_company = site_env_parts[1] if len(site_env_parts) >= 2 else ''
+
+    embed_text = f"{meta.get('title', '')}\n{sections['DESCRIPTION']}\n{sections['RESOLUTION']}"
+
+    # 6. Assemble final JSON
     ticket = {
         # — Identity —
         'reference':    meta.get('reference', ''),
@@ -283,6 +324,7 @@ def txt_to_json(txt_path: Path) -> dict:
         'version':      meta.get('version', ''),
         'system':       meta.get('system', ''),
         'site_env':     meta.get('site_env', ''),
+        'client_company': client_company,
 
         # — Routing —
         'support_team':    meta.get('support_team', 'Unknown'),
@@ -293,19 +335,23 @@ def txt_to_json(txt_path: Path) -> dict:
         'closing_status_code':        meta.get('closing_status_code', ''),
         'closing_status_explanation': meta.get('closing_status_explanation', ''),
         'closing_level':              meta.get('closing_level', ''),
-        'is_closed': meta.get('closing_status_code', '').startswith('C'),
+        'is_closed': meta.get('closing_status_code', '') in _STATUS_CLOSED,
 
         # — Content (KEY FIELDS FOR RAG) —
         'description':  sections['DESCRIPTION'],
         'resolution':   sections['RESOLUTION'],
-        'patches':      patches,
+        'embed_text':   embed_text,
+        'patches':      all_patches,
 
         # — Conversation —
         'conversation': conversation,
         'message_count': len(conversation),
 
+        # — ESPDSN Version (DSN team only) —
+        'espdsn_version': _extract_espdsn_version(sections['CONVERSATION']) if meta.get('support_team') == 'DSN' else '',
+
         # — Meta —
-        'confidence':    float(meta.get('confidence', 0)),
+        'confidence':    float(meta.get('confidence', 0) or 0),
         'content_hash':  meta.get('content_hash', ''),
     }
 
@@ -331,6 +377,12 @@ def convert_all(input_dir: Path, output_dir: Path, team_filter: Optional[str] = 
 
     for txt_path in txt_files:
         try:
+            # Skip if JSON already exists and is newer than the .txt
+            out_path = output_dir / (txt_path.stem + '.json')
+            if out_path.exists() and out_path.stat().st_mtime >= txt_path.stat().st_mtime:
+                skipped += 1
+                continue
+
             ticket = txt_to_json(txt_path)
 
             # Team filter
@@ -343,7 +395,6 @@ def convert_all(input_dir: Path, output_dir: Path, team_filter: Optional[str] = 
             team_dist[team] = team_dist.get(team, 0) + 1
 
             # Output filename: same stem, .json extension
-            out_path = output_dir / (txt_path.stem + '.json')
             with open(out_path, 'w', encoding='utf-8') as f:
                 json.dump(ticket, f, ensure_ascii=False, indent=2)
 

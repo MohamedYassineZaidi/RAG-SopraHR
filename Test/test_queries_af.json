@@ -1,0 +1,52 @@
+{
+  "eval_items": [
+    {
+      "id": "AF-01",
+      "team": "Outils",
+      "question": "Notre client utilise la devise TND (dinar tunisien) qui requiert 3 décimales. Dans HR Access 5.0, les montants financiers ne s'affichent qu'avec 2 décimales. Comment forcer l'affichage à 3 décimales pour une rubrique numérique dans les pages Web ?",
+      "expected_ticket_ref": "AF W15725",
+      "expected_answer": "Affichage d'une zone numérique avec 3 décimales",
+      "note": "currency decimal display - TND"
+    },
+    {
+      "id": "AF-02",
+      "team": "Appli",
+      "question": "L'état de paiement standard HR Access affiche un montant avec un décalage de virgule : au lieu de 13297,1900 on obtient 132971.900. Par ailleurs, le montant NET 975 est arrondi à 2 décimales alors que la devise TND en requiert 3. Comment corriger le programme DBU pour ce cas ?",
+      "expected_ticket_ref": "AF W16286",
+      "expected_answer": "Problème de décimale sur l'état de paiement",
+      "note": "payment state decimal shift - DBU program"
+    },
+    {
+      "id": "AF-03",
+      "team": "Outils",
+      "question": "Le CD d'installation Impromptu 7.1 que nous avons reçu est illisible. L'installation est bloquée à cause d'un problème de lecture du CD. Pouvez-vous nous envoyer un CD de remplacement ?",
+      "expected_ticket_ref": "AF W16590",
+      "expected_answer": "Livraison du CD Impromptu 7.1",
+      "note": "CD delivery request"
+    },
+    {
+      "id": "AF-04",
+      "team": "Outils",
+      "question": "Comment exploiter le type de document 'Transfert micro' dans HR Access 5.0 ? Où peut-on récupérer ce type de sortie, l'équivalent du téléchargement des résultats disponible dans la version 3e ?",
+      "expected_ticket_ref": "AF W16634",
+      "expected_answer": "Récupération d'une édition transfert micro",
+      "note": "transfert micro output format"
+    },
+    {
+      "id": "AF-05",
+      "team": "Appli",
+      "question": "Le décompte automatique des droits de congé ne se déclenche pas lors de la saisie d'un congé annuel. La saisie est acceptée même en cas de dépassement. Il faut renseigner manuellement la date de début d'acquisition dans ZYDV pour que le contrôle se déclenche. Comment résoudre ce comportement ?",
+      "expected_ticket_ref": "AF W17231",
+      "expected_answer": "Impossible de faire le suivi de la consommation de congé",
+      "note": "leave module - ZYDV acquisition date"
+    },
+    {
+      "id": "AF-06",
+      "team": "Outils",
+      "question": "Lors de l'exécution d'une requête via l'onglet Compagnon, le message suivant apparaît : 'Impossible de trouver le serveur HRD Query associé au serveur applicatif web WEBDEV. Veuillez vérifier la définition de l'objet site.' Comment paramétrer correctement l'objet Site pour résoudre ce problème ?",
+      "expected_ticket_ref": "AF W17297",
+      "expected_answer": "l'exécution des requêtes est impossible",
+      "note": "HRD Query server configuration - QueryServerForTP"
+    }
+  ]
+}

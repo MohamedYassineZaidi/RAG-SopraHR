@@ -27,7 +27,10 @@ import argparse
 import csv
 import hashlib
 import re
+import sys
 import time
+
+csv.field_size_limit(sys.maxsize)
 from collections import Counter
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional
@@ -223,30 +226,34 @@ def extract_reply_blocks(block_lines: List[str]) -> List[str]:
 
 def extract_resolution(block_lines: List[str]) -> str:
     """
-    Extracts the most technically meaningful support reply as the resolution.
+    Extracts ALL technically meaningful support replies as the resolution.
     This is the KEY FIELD for RAG — it's the answer to retrieve.
 
     Strategy:
     - Collect all Reply blocks
-    - Score each by technical content
-    - Skip courtesy-only messages
-    - Return highest-scoring reply (prefer later ones on tie)
+    - Skip courtesy-only / very short messages
+    - Concatenate ALL technical replies in chronological order
+      (tickets often have multiple iterations: first patch didn't work,
+       support gave a second patch, etc. — we need ALL of them)
     """
     replies = extract_reply_blocks(block_lines)
 
-    candidates = []
-    for i, reply in enumerate(replies):
+    technical_replies = []
+    for reply in replies:
         if len(reply) < 30:
             continue
         if is_courtesy_only(reply):
             continue
-        score = technical_score(reply)
-        candidates.append((score, i, reply))  # i used for stable sort by position
+        if technical_score(reply) == 0:
+            continue
+        technical_replies.append(reply)
 
-    if candidates:
-        # Sort by score desc, then by position desc (prefer later replies)
-        candidates.sort(key=lambda x: (x[0], x[1]), reverse=True)
-        return candidates[0][2]
+    if technical_replies:
+        # Join with separator so the agent can see distinct iterations
+        if len(technical_replies) == 1:
+            return technical_replies[0]
+        sep = "\n\n--- Réponse suivante ---\n\n"
+        return sep.join(technical_replies)
 
     # Fallback: last non-empty reply regardless
     for reply in reversed(replies):
@@ -277,10 +284,11 @@ def extract_patches(block: str) -> List[str]:
     ref_match = re.search(r'^reference:\s*\S+\s*W(\d+)', block, re.MULTILINE)
     ref_suffix = ref_match.group(1)[-5:] if ref_match else None
 
-    # Filter: real HRA patches are >= 150000; exclude ticket reference numbers
+    # Filter: real HRA patches are >= 10000; exclude ticket reference numbers
+    # (Lowered from 150000 — older HRA versions use 5-digit patches like 127043)
     filtered = []
     for p in patches:
-        if int(p) < 150000:
+        if int(p) < 10000:
             continue
         if ref_suffix and p.endswith(ref_suffix):
             continue

@@ -28,20 +28,35 @@ Usage:
       --question "Erreur ORA-00942 lors du lancement REGDSN"
 
   # Side-by-side evaluation: vector vs pageindex vs hybrid
-  python hybrid_rag.py evaluate --index data/pageindex --db data/indexes \\
-      --json data/json --team DSN --samples 50
+  python hybrid_rag.py evaluate --index data/pageindex --db data/indexes --json data/json --team DSN --samples 50
 """
 
+import os
 import json
-import time
 import pickle
+import time
+import math
 import argparse
 import numpy as np
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
+from dotenv import load_dotenv
+load_dotenv()
+
 import faiss
 from sentence_transformers import SentenceTransformer
+
+hf_token = os.getenv("HF_TOKEN")
+if hf_token:
+    try:
+        import ssl
+        import urllib.request
+        from huggingface_hub import login
+        login(token=hf_token, add_to_git_credential=False)
+    except Exception:
+        pass
 
 from rag_utils import (
     TEAMS, TOP_K, RRF_K, EMBEDDING_MODEL,
@@ -67,7 +82,7 @@ def load_vector_index(db_dir: Path, team: str):
     if not (p / "index.faiss").exists():
         raise FileNotFoundError(
             f"No vector index for '{team}' at {p}.\n"
-            f"Run: python rag_assistant.py index --json <json_dir> --db {db_dir}"
+            f"Run: python vector_rag.py build --json <json_dir> --db {db_dir}"
         )
     index = faiss.read_index(str(p / "index.faiss"))
     with open(p / "docstore.pkl", "rb") as f:
@@ -92,16 +107,24 @@ def vector_retrieve(
         if idx < 0:
             continue
         doc = docstore[idx]
+        ref = doc.get("reference", "")
+        # Filter out non-French-language tickets (German, English, Italian, Dutch)
+        # but keep FR (France), AF (French-speaking Africa), SP (Maghreb/francophone)
+        _NON_FRENCH = ("DE ", "UK ", "IT ", "NL ")
+        if ref and ref.startswith(_NON_FRENCH):
+            continue
         results.append({
-            "rank":        rank + 1,
+            "rank":        len(results) + 1,
             "score":       round(float(sim), 4),
             "similarity":  round(float(sim), 4),
-            "reference":   doc.get("reference", ""),
+            "reference":   ref,
             "title":       doc.get("title", ""),
             "version":     doc.get("version", ""),
             "description": doc.get("description", ""),
             "resolution":  doc.get("resolution", ""),
             "patches":     doc.get("patches", []),
+            "last_date":   doc.get("last_date", ""),
+            "espdsn_version": doc.get("espdsn_version", ""),
             "source":      "vector",
             "cluster":     "",
         })
@@ -117,14 +140,21 @@ def reciprocal_rank_fusion(
     pageindex_results: list,
     bm25_results: list,
     k: int = RRF_K,
+    top_k: int | None = None,
 ) -> list:
     """
-    3-way RRF: Vector + PageIndex + BM25.
+    3-way RRF: Vector + PageIndex + BM25, with recency boost.
 
-    Score for each ticket = Σ 1 / (k + rank_i) across all systems.
+    Score for each ticket = Σ weight_i / (k + rank_i) across all systems.
+    BM25 gets a 1.5× weight boost because it excels at matching exact
+    technical terms (error codes, patch numbers, rubrique names) that
+    vector search misses due to semantic dilution.
+
     A ticket appearing in 2 or 3 systems gets a strong boost.
-    BM25 is especially powerful for exact error codes and patch numbers
-    where vector similarity underperforms.
+
+    Recency boost: tickets with more recent conversation dates get a
+    multiplicative bonus (up to 1.3x for tickets from the current year,
+    down to 1.0x for tickets older than 5 years).
     """
     scores: dict = {}
 
@@ -136,14 +166,33 @@ def reciprocal_rank_fusion(
         ref = result["reference"]
         scores[ref] = scores.get(ref, 0.0) + 1.0 / (k + result["rank"])
 
+    # BM25 gets 1.5× weight — exact keyword matches are more reliable
+    # for technical support queries (error codes, patch numbers, etc.)
     for result in bm25_results:
         ref = result["reference"]
-        scores[ref] = scores.get(ref, 0.0) + 1.0 / (k + result["rank"])
+        scores[ref] = scores.get(ref, 0.0) + 1.5 / (k + result["rank"])
 
     # Merge metadata — priority: vector > bm25 > pageindex
     all_meta = {r["reference"]: r for r in pageindex_results}
     all_meta.update({r["reference"]: r for r in bm25_results})
     all_meta.update({r["reference"]: r for r in vector_results})
+
+    # Apply recency boost based on last_date
+    # Recent tickets are far more likely to be relevant (same software version,
+    # same config). Boost decays exponentially so tickets from the last 2 years
+    # are strongly preferred over 10-year-old ones.
+    now = datetime.now()
+    for ref in scores:
+        last_date = all_meta[ref].get("last_date", "")
+        if last_date:
+            try:
+                ticket_dt = datetime.fromisoformat(last_date)
+                age_days = max(0, (now - ticket_dt).days)
+                # Exponential decay: 1.8× for today → ~1.4× at 1 year → ~1.0× at 3+ years
+                boost = 1.0 + 0.8 * math.exp(-age_days / 730)  # half-life ~2 years
+                scores[ref] *= boost
+            except (ValueError, TypeError):
+                pass
 
     # Build source sets for labelling
     vector_refs    = {r["reference"] for r in vector_results}
@@ -166,7 +215,7 @@ def reciprocal_rank_fusion(
     for i, r in enumerate(merged):
         r["rank"] = i + 1
 
-    return merged[:TOP_K]
+    return merged[: (top_k if top_k is not None else TOP_K)]
 
 
 # ─────────────────────────────────────────────

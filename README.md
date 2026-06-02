@@ -1,195 +1,339 @@
-# RAG-Based Support Assistant for Sopra HR Tickets
+# RAG Support Agent for Sopra HR Tickets
 
-## Overview
+This repository is a support-search and answer-assistance system built from historical Sopra HR tickets.
 
-AI-powered support assistant for **Sopra HR** built on historical **IBM Lotus support tickets**. The system uses **Retrieval-Augmented Generation (RAG)** to help support agents quickly find similar past issues and reuse validated resolutions.
+It does four things:
 
-Three retrieval strategies are benchmarked and combined:
+1. Converts raw Lotus ticket exports into structured data.
+2. Builds several retrieval systems over resolved tickets.
+3. Fuses those retrieval systems into a stronger hybrid retriever.
+4. Exposes a ReAct-style support agent that uses the hybrid search stack to answer consultant questions and cite past tickets.
 
-| Strategy | Description |
-|---|---|
-| **Vector RAG** | FAISS + `paraphrase-multilingual-mpnet-base-v2` embeddings |
-| **BM25 RAG** | Keyword-frequency retrieval, best for error codes and patch numbers |
-| **Vectorless / PageIndex** | LLM-navigated 3-level index (no embeddings) via AWS Bedrock |
-| **Hybrid RAG** | Reciprocal Rank Fusion (RRF) of all three systems |
+The project is no longer just a vector-search prototype. The main deliverable in the current codebase is a multi-retriever support agent with evaluation scripts and a CLI.
 
----
+## What The Project Actually Does
 
-## Project Structure
+The current workflow is:
 
-```
-.
-├── scripts/
-│   ├── tickets_pipeline.py        # Split raw .txt export → one .txt per ticket
-│   ├── tickets_to_json_claude.py  # Structured JSON extraction via Claude (Bedrock)
-│   ├── tickets_to_json_aws.py     # Alternative extraction via AWS Titan
-│   ├── tickets_to_json_mistral.py # Alternative extraction via Mistral
-│   ├── ticket_parser.py           # Shared parsing utilities
-│   ├── txt_to_json.py             # Rule-based .txt → JSON converter
-│   ├── rag_assistant.py           # Vector RAG: index + query + evaluate
-│   ├── vectorless_rag.py          # PageIndex RAG: build + query + evaluate
-│   ├── bm25_rag.py                # BM25 RAG: build + query + evaluate
-│   ├── hybrid_rag.py              # Hybrid RRF fusion: query + evaluate
-│   ├── evaluate_hybrid.py         # Full evaluation suite (all metrics, all teams)
-│   ├── evaluate_vectorless.py     # Standalone vectorless evaluation
-│   ├── rag_utils.py               # Shared constants, cluster taxonomy, Bedrock client
-│   ├── json_to_pdf.py             # Export ticket JSON to PDF
-│   └── check_imports.py           # Environment dependency check
-│
-├── data/
-│   ├── json/                      # Structured ticket JSON files (source of truth)
-│   ├── analysis_json/             # Per-ticket deep analysis JSON
-│   ├── pageindex/                 # PageIndex files + eval results
-│   │   ├── pageindex.json
-│   │   ├── {team}_l3.txt
-│   │   └── eval_*.json
-│   ├── bm25/                      # BM25 eval results (pickle indexes are gitignored)
-│   │   └── eval_bm25_{team}.json
-│   ├── tickets_index.csv          # Master ticket index
-│   └── eval_results.json          # Vector RAG evaluation results
-│
-├── output/
-│   └── eval_set.json              # Evaluation question set
-│
-├── Test/
-│   └── test_queries.json          # Manual test queries
-│
-├── .env                           # AWS credentials (gitignored)
-├── .gitignore
-└── README.md
+```text
+Raw Lotus export (.txt)
+        -> tickets_pipeline.py
+Per-ticket .txt files with metadata and conversation blocks
+        -> txt_to_json.py or tickets_to_json_*.py
+Structured ticket JSON
+        -> rag_assistant.py      (FAISS vector indexes)
+        -> bm25_rag.py           (BM25 keyword indexes)
+        -> vectorless_rag.py     (LLM-navigated PageIndex)
+        -> hybrid_rag.py         (RRF fusion of the three)
+        -> agent.py / cli.py     (ReAct support agent)
+        -> evaluate_*.py         (retrieval and agent evaluation)
 ```
 
----
+The retrieval stack is split by support team:
+
+| Team | Scope |
+| --- | --- |
+| `DSN` | DSN and declaration issues |
+| `Appli` | Functional and application issues |
+| `Outils` | Tools, generation, queries, and system-side tooling |
+
+## Retrieval Components
+
+### 1. Vector RAG
+
+Implemented in `scripts/rag_assistant.py`.
+
+- Uses FAISS local indexes.
+- Uses `sentence-transformers` multilingual embeddings.
+- Indexes ticket title, description, resolution, and patches.
+- Best for semantic similarity and paraphrased questions.
+
+### 2. BM25 RAG
+
+Implemented in `scripts/bm25_rag.py`.
+
+- Keyword retrieval with field boosting.
+- Preserves exact codes such as `ORA-00942`, patch IDs, and product names.
+- Best when the user already knows the exact token they want to find.
+
+### 3. Vectorless PageIndex RAG
+
+Implemented in `scripts/vectorless_rag.py`.
+
+- No embeddings.
+- Builds a 3-level hierarchical index by team and topic cluster.
+- Uses an LLM to select clusters, then pick relevant tickets.
+- Best for structured navigation and cases where retrieval benefits from reasoning over ticket summaries.
+
+### 4. Hybrid Retrieval
+
+Implemented in `scripts/hybrid_rag.py`.
+
+- Combines vector, BM25, and PageIndex results.
+- Uses Reciprocal Rank Fusion (RRF).
+- This is the retrieval layer used by the agent.
+
+### 5. ReAct Support Agent
+
+Implemented in `scripts/agent.py` and exposed through `scripts/cli.py`.
+
+- Loads all three index types for one team.
+- Forces tool use before answering.
+- Returns structured JSON containing:
+  - analysis
+  - cited ticket references
+  - likely cause
+  - resolution
+  - patches
+  - a Lotus-style customer reply draft
+- Uses Amazon Bedrock by default.
+- Can also use an OpenAI-compatible endpoint if `OPENAI_API_KEY` is configured.
+
+## Data And Artifacts
+
+Important folders in this repository:
+
+| Path | Purpose |
+| --- | --- |
+| `data/raw/` | raw source exports |
+| `data/output/` | per-ticket text files generated by the pipeline |
+| `data/json/` | structured ticket JSON used by the current retrieval stack |
+| `data/analysis_json/` | richer LLM-generated analyses |
+| `data/analysis_pdf/` | PDF exports of analysis JSON |
+| `data/indexes/` | FAISS indexes per team for `rag_assistant.py` |
+| `data/bm25/` | BM25 indexes and evaluation outputs |
+| `data/pageindex/` | PageIndex files and evaluation outputs |
+| `output/` | evaluation reports, including agent evaluation |
+| `Test/test_queries.json` | end-to-end agent evaluation set |
+
+There are also older prototype artifacts in the repository, notably `data/cleaned/`, `data/faiss_db/`, and `scripts/vector_rag.py`. Those are still useful for experiments, but the active stack documented here is based on `data/json/`, `data/indexes/`, `data/bm25/`, `data/pageindex/`, and the agent CLI.
+
+## Main Scripts
+
+| Script | Role |
+| --- | --- |
+| `scripts/tickets_pipeline.py` | split a raw Lotus export into one ticket file per case |
+| `scripts/txt_to_json.py` | parse ticket text files into clean JSON |
+| `scripts/tickets_to_json_claude.py` | produce richer JSON analysis with Claude |
+| `scripts/tickets_to_json_aws.py` | alternative AWS-based JSON extraction |
+| `scripts/tickets_to_json_mistral.py` | alternative OpenAI-compatible extraction |
+| `scripts/json_to_pdf.py` | export analysis JSON to PDF |
+| `scripts/rag_assistant.py` | build/query/evaluate FAISS vector indexes |
+| `scripts/bm25_rag.py` | build/query/evaluate BM25 indexes |
+| `scripts/vectorless_rag.py` | build/query/evaluate PageIndex retrieval |
+| `scripts/hybrid_rag.py` | query and evaluate fused retrieval |
+| `scripts/agent.py` | manual ReAct agent over the hybrid retrieval tool |
+| `scripts/cli.py` | main command-line entry point for consultants |
+| `scripts/evaluate_hybrid.py` | compare vector, BM25, PageIndex, and hybrid retrieval |
+| `scripts/evaluate_agent.py` | end-to-end evaluation of the support agent |
 
 ## Setup
 
-### Requirements
+### 1. Create a virtual environment
 
-```bash
-pip install faiss-cpu sentence-transformers boto3 python-dotenv numpy rank-bm25 tiktoken
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
 ```
 
-### AWS credentials
+### 2. Install dependencies
 
-Create a `.env` file at the project root:
+```powershell
+pip install -r requirements.txt
+```
+
+### 3. Configure model access
+
+Create a `.env` file at the project root.
+
+For Bedrock:
 
 ```env
 AWS_ACCESS_KEY_ID=...
 AWS_SECRET_ACCESS_KEY=...
+AWS_SESSION_TOKEN=...
 AWS_DEFAULT_REGION=eu-west-1
+BEDROCK_MODEL_ID=anthropic.claude-3-haiku-20240307-v1:0
 ```
 
----
+Optional OpenAI-compatible backend for the agent:
 
-## Data Pipeline
-
-```
-Raw .txt export (IBM Lotus)
-        │
-        ▼
-tickets_pipeline.py        ← splits into one .txt per ticket
-        │
-        ▼
-tickets_to_json_claude.py  ← extracts structured JSON via LLM
-        │
-        ▼
-  data/json/*.json          ← source of truth for all RAG systems
-        │
-   ┌────┴────────────┬──────────────────┐
-   ▼                 ▼                  ▼
-rag_assistant.py  bm25_rag.py    vectorless_rag.py
-(FAISS index)    (BM25 index)    (PageIndex)
-   └────┬────────────┴──────────────────┘
-        ▼
-   hybrid_rag.py   ← RRF fusion of all three
+```env
+OPENAI_API_KEY=...
+OPENAI_BASE_URL=...
+OPENAI_MODEL=gpt-4o-mini
 ```
 
----
+Optional if a gated Hugging Face model download needs authentication:
 
-## Usage
+```env
+HF_TOKEN=...
+```
 
-### Vector RAG
+## Quick Start
 
-```bash
-# Build FAISS indexes
+If the ticket JSON already exists in `data/json/`, the shortest path is:
+
+```powershell
 python scripts/rag_assistant.py index --json data/json --db data/indexes
+python scripts/bm25_rag.py build --json data/json --db data/bm25
+python scripts/vectorless_rag.py build --json data/json --index data/pageindex
+python scripts/cli.py --team DSN
+```
 
-# Query
-python scripts/rag_assistant.py query --db data/indexes --team DSN
-python scripts/rag_assistant.py query --db data/indexes --team Appli --question "Erreur ORA-00942 REGDSN"
+For a single question:
 
-# Evaluate
+```powershell
+python scripts/cli.py --team DSN --question "Erreur ORA-00942 lors du lancement REGDSN"
+```
+
+## End-To-End Workflow
+
+### A. Prepare ticket data
+
+Split a raw export into one text file per ticket:
+
+```powershell
+python scripts/tickets_pipeline.py --raw-file data/raw/FR_5000.txt --out-dir data/output
+```
+
+Convert those files into structured JSON:
+
+```powershell
+python scripts/txt_to_json.py --input data/output --output data/json
+```
+
+If you want richer LLM-produced analysis JSON instead of rule-based parsing, use one of:
+
+```powershell
+python scripts/tickets_to_json_claude.py
+python scripts/tickets_to_json_aws.py
+python scripts/tickets_to_json_mistral.py
+```
+
+### B. Build retrieval indexes
+
+Build vector indexes:
+
+```powershell
+python scripts/rag_assistant.py index --json data/json --db data/indexes
+```
+
+Build BM25 indexes:
+
+```powershell
+python scripts/bm25_rag.py build --json data/json --db data/bm25
+```
+
+Build PageIndex:
+
+```powershell
+python scripts/vectorless_rag.py build --json data/json --index data/pageindex
+```
+
+### C. Query the systems directly
+
+Vector retrieval:
+
+```powershell
+python scripts/rag_assistant.py query --db data/indexes --team Appli --question "Erreur de validation page FSWDRE01"
+```
+
+BM25 retrieval:
+
+```powershell
+python scripts/bm25_rag.py query --db data/bm25 --team DSN --question "ORA-00942 REGDSN table inexistante"
+```
+
+PageIndex retrieval:
+
+```powershell
+python scripts/vectorless_rag.py query --index data/pageindex --team Outils --question "Erreur R_SYSTEM sur HRCT"
+```
+
+Hybrid retrieval:
+
+```powershell
+python scripts/hybrid_rag.py query --index data/pageindex --db data/indexes --bm25 data/bm25 --team DSN --question "Erreur ORA-00942 lors du lancement REGDSN"
+```
+
+### D. Use the support agent
+
+Interactive session:
+
+```powershell
+python scripts/cli.py --team DSN
+```
+
+Single-shot JSON output:
+
+```powershell
+python scripts/cli.py --team Appli --question "rubrique absente" --no-pretty
+```
+
+Verbose ReAct trace:
+
+```powershell
+python scripts/cli.py --team Outils --question "R_SYSTEM sur génération HRCT" --verbose
+```
+
+## Evaluation
+
+Evaluate vector retrieval:
+
+```powershell
 python scripts/rag_assistant.py evaluate --db data/indexes --json data/json --team DSN --samples 50
 ```
 
-### BM25 RAG
+Evaluate BM25 retrieval:
 
-```bash
-# Build
-python scripts/bm25_rag.py build --json data/json --db data/bm25
-
-# Query
-python scripts/bm25_rag.py query --db data/bm25 --team DSN --question "ORA-00942 REGDSN table inexistante"
-
-# Evaluate
-python scripts/bm25_rag.py evaluate --db data/bm25 --json data/json --team DSN
+```powershell
+python scripts/bm25_rag.py evaluate --db data/bm25 --json data/json --team DSN --samples 50
 ```
 
-### PageIndex (Vectorless) RAG
+Evaluate PageIndex retrieval:
 
-```bash
-# Build
-python scripts/vectorless_rag.py build --json data/json --index data/pageindex
-
-# Query
-python scripts/vectorless_rag.py query --index data/pageindex --team DSN --question "Erreur ORA-00942"
-
-# Evaluate
-python scripts/vectorless_rag.py evaluate --index data/pageindex --json data/json --team DSN
+```powershell
+python scripts/vectorless_rag.py evaluate --index data/pageindex --json data/json --team DSN --samples 50
 ```
 
-### Hybrid RAG
+Compare all retrieval systems side by side:
 
-```bash
-# Query
-python scripts/hybrid_rag.py query --index data/pageindex --db data/indexes --team DSN
-
-# Single question
-python scripts/hybrid_rag.py query --index data/pageindex --db data/indexes --team DSN \
-    --question "Erreur ORA-00942 lors du lancement REGDSN"
-
-# Full evaluation (all metrics, all teams)
-python scripts/evaluate_hybrid.py \
-    --index data/pageindex \
-    --db    data/indexes \
-    --bm25  data/bm25 \
-    --json  data/json \
-    --team  Appli \
-    --samples 50
+```powershell
+python scripts/evaluate_hybrid.py --index data/pageindex --db data/indexes --bm25 data/bm25 --json data/json --team Appli --samples 50
 ```
 
----
+Evaluate the full agent:
 
-## Evaluation Results
+```powershell
+python scripts/evaluate_agent.py --team all
+python scripts/evaluate_agent.py --team DSN --samples 5 --verbose
+```
 
-Results are stored as JSON in `data/pageindex/`, `data/bm25/`, and `data/eval_results.json`.
+Outputs are written under `output/` and, depending on the script, under `data/bm25/`, `data/pageindex/`, and `data/eval_results.json`.
 
-The `evaluate_hybrid.py` script reports:
-- **Recall@1 / @3 / @5** — exact ticket self-retrieval per system
-- **Cluster Routing Accuracy** — PageIndex cluster assignment correctness
-- **Effective Recall** — useful misses counted via resolution keyword overlap
-- **Per-system comparison table** — vector vs BM25 vs PageIndex vs Hybrid
+## Legacy / Experimental Components
 
----
+These files are still part of the repository but are not the main path for the current support-agent workflow:
 
-## Teams
+- `scripts/vector_rag.py`: earlier standalone FAISS-based prototype using `data/cleaned/` and `data/faiss_db/`.
+- `data/cleaned/`: older normalized ticket JSON set.
+- `data/faiss_db/`: older FAISS artifact location.
 
-Tickets are segmented into three support teams:
+If you are starting from the current codebase, prefer:
 
-| Team | Domain |
-|------|--------|
-| **DSN** | Déclaration Sociale Nominative |
-| **Appli** | Application / functional issues |
-| **Outils** | Tools and integrations |
+- `scripts/cli.py` for asking questions.
+- `scripts/evaluate_agent.py` for end-to-end quality checks.
+- `scripts/rag_assistant.py`, `scripts/bm25_rag.py`, and `scripts/vectorless_rag.py` for building indexes.
 
----
+## Summary
+
+This repository is a retrieval and agent-evaluation workspace for Sopra HR support knowledge.
+
+The important point is that it now operates as a hybrid support agent stack, not just a single RAG experiment:
+
+- ticket ingestion and normalization
+- multiple retrievers with different strengths
+- fused hybrid retrieval
+- a ReAct agent that produces structured support answers
+- benchmark scripts to measure retrieval and answer quality

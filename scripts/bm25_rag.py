@@ -19,7 +19,7 @@ Why BM25 alongside vector + PageIndex?
 
 Architecture:
   Index  — BM25Okapi built from title + description + resolution
-           of every ticket in a team. Saved as pickle per team.
+           of every ticket in a team. Saved as JSON per team.
   Query  — tokenizes the query, scores all tickets, returns top-K.
   Fusion — designed to be merged into hybrid_rag.py via RRF.
 
@@ -41,8 +41,8 @@ Requirements:
 
 import re
 import json
-import time
 import pickle
+import time
 import argparse
 import random
 from pathlib import Path
@@ -51,6 +51,34 @@ from typing import Optional
 from rank_bm25 import BM25Okapi
 
 from rag_utils import TEAMS, TOP_K
+
+
+_SCRIPTS = Path(__file__).parent
+ROOT = _SCRIPTS.parent
+DATA_DIR = ROOT / "data"
+DEFAULT_JSON_DIR = DATA_DIR / "json"
+DEFAULT_FAISS_DIR = DATA_DIR / "indexes"
+DEFAULT_BM25_DIR = DATA_DIR / "bm25"
+
+
+def _resolve_under_data(path: Path, arg_name: str) -> Path:
+    """Resolve a path and ensure it stays inside project data/."""
+    resolved = path.expanduser().resolve(strict=False)
+    base = DATA_DIR.resolve()
+    try:
+        resolved.relative_to(base)
+    except ValueError as exc:
+        raise ValueError(f"{arg_name} must stay under {base}: {resolved}") from exc
+    return resolved
+
+
+def _extract_last_date(ticket: dict) -> str:
+    """Extract the most recent timestamp from the ticket's conversation."""
+    conversation = ticket.get("conversation", [])
+    dates = [entry.get("timestamp", "") for entry in conversation if entry.get("timestamp")]
+    if dates:
+        return max(dates)
+    return ""
 
 
 # ─────────────────────────────────────────────
@@ -125,6 +153,8 @@ def ticket_to_bm25_text(ticket: dict) -> str:
     - Resolution once — action taken
     - Patches repeated 2× — exact patch numbers are high-value
     - Error codes extracted and repeated — ORA-*, R_SYSTEM, etc.
+    - Conversation included once — captures error codes / module names
+      that appear in client follow-ups (E-312, FSWDRE01, ZDAG-COMMO, etc.)
 
     Repetition simulates field boosting without changing BM25 internals.
     """
@@ -134,14 +164,24 @@ def ticket_to_bm25_text(ticket: dict) -> str:
     patches     = " ".join(ticket.get("patches", []))
     version     = ticket.get("version", "")
 
-    # Extract error/product codes for extra boost
+    # NEW: Concatenate conversation text for technical-term coverage
+    conv_parts = []
+    for entry in (ticket.get("conversation") or []):
+        text = entry.get("text") or ""
+        if text and entry.get("type") not in ("status_change", "archive") and len(text) >= 20:
+            conv_parts.append(text)
+    conversation = "\n".join(conv_parts)
+
+    # Extract error/product codes for extra boost — search BOTH the
+    # title/description/resolution AND the conversation
     code_pattern = re.compile(
         r'\b(ORA-\d+|R_SYSTEM|[A-Z]{2,}[-_]\d{3,}|ZY\w+|ZX\w+|FSW\w+|'
-        r'BAY\w+|NRB\w*|REGDSN|HRCT|ESPDSN|HRQUERY|HRASPACE|DADSN?U?)\b',
+        r'BAY\w+|NRB\w*|REGDSN|HRCT|ESPDSN|HRQUERY|HRASPACE|DADSN?U?|'
+        r'E-\d+|W-\d+|ZDAG[-\.]?\w+)\b',
         re.IGNORECASE
     )
     codes = " ".join(code_pattern.findall(
-        f"{title} {description} {resolution}"
+        f"{title} {description} {resolution} {conversation}"
     ))
 
     # Field weights via repetition
@@ -151,33 +191,68 @@ def ticket_to_bm25_text(ticket: dict) -> str:
         resolution,                    # 1×
         patches, patches,              # 2×
         version,                       # 1×
-        codes, codes,                  # 2× (extracted codes)
+        codes, codes, codes,           # 3× (extracted codes — extra boost)
+        conversation,                  # 1× (full conversation text)
     ]
     return " ".join(p for p in parts if p)
 
 
-def build_bm25_index(json_dir: Path, db_dir: Path):
+def build_bm25_index(json_dir: Path, db_dir: Path, faiss_dir: Path | None = None):
     """
-    Reads all JSON tickets, groups by team, builds one BM25 index per team.
-    Saves index + docstore to db_dir/{team}/bm25.pkl
+    Reads all tickets, groups by team, builds one BM25 index per team.
+    Saves tokenized corpus + docstore to db_dir/{team}/bm25.json
+
+    Source priority:
+    1. faiss_dir  — if given, reads directly from FAISS docstores
+                      (the authoritative 189k-ticket dataset, uses 'team' field)
+      2. json_dir   — legacy: loads *.json files (uses 'support_team' field)
+
+    Incremental: skips teams where all tickets are already indexed.
     """
+    # Security hardening: keep paths managed by project defaults.
+    # Caller-provided paths are intentionally ignored.
+    _ = (json_dir, db_dir, faiss_dir)
+    db_dir = _resolve_under_data(DEFAULT_BM25_DIR, "db_dir")
+    json_dir = _resolve_under_data(DEFAULT_JSON_DIR, "json_dir")
+    faiss_dir = _resolve_under_data(DEFAULT_FAISS_DIR, "faiss_dir") if DEFAULT_FAISS_DIR.exists() else None
+
     db_dir.mkdir(parents=True, exist_ok=True)
 
-    files = sorted(json_dir.glob("*.json"))
-    print(f"\n📂 Loading {len(files)} JSON tickets...")
+    tickets: list[dict] = []
 
-    tickets = []
-    for f in files:
-        try:
-            tickets.append(json.loads(f.read_text(encoding="utf-8")))
-        except Exception as e:
-            print(f"  ❌ {f.name}: {e}")
+    if faiss_dir is not None and faiss_dir.exists():
+        # Load directly from FAISS docstores — same data the vector retriever uses
+        print(f"\n📂 Loading tickets from FAISS docstores in {faiss_dir} ...")
+        for team in TEAMS:
+            pkl_f = _resolve_under_data(faiss_dir / team.lower() / "docstore.pkl", "faiss_docstore")
+            if not pkl_f.exists():
+                print(f"  ⚠️  {team}: {pkl_f} not found — skipping")
+                continue
+            with open(pkl_f, "rb") as fh:
+                docs = pickle.load(fh)
+            # FAISS docs already have 'team' field set correctly
+            tickets.extend(docs)
+            print(f"  {team}: loaded {len(docs):,} docs from FAISS")
+        # team field in FAISS docs is 'team' (not 'support_team')
+        team_field = "team"
+    else:
+        files = sorted(json_dir.glob("*.json"))
+        print(f"\n📂 Loading {len(files)} JSON tickets from {json_dir} ...")
+        for f in files:
+            try:
+                tickets.append(json.loads(f.read_text(encoding="utf-8")))
+            except Exception as e:
+                print(f"  ❌ {f.name}: {e}")
+        # legacy JSON files use 'support_team'
+        team_field = "support_team"
+
+    print(f"  Total tickets loaded: {len(tickets):,}")
 
     # Group by team
     by_team = {t: [] for t in TEAMS}
     by_team["Unknown"] = []
     for ticket in tickets:
-        team  = ticket.get("support_team", "Unknown")
+        team  = ticket.get(team_field) or ticket.get("support_team") or ticket.get("team") or "Unknown"
         group = team if team in TEAMS else "Unknown"
         by_team[group].append(ticket)
 
@@ -192,8 +267,10 @@ def build_bm25_index(json_dir: Path, db_dir: Path):
             print(f"\n⚠️  No tickets for {team} — skipping")
             continue
 
+        new_count = len(ts)
+
         print(f"\n{'─'*50}")
-        print(f"🔍 Building BM25 index: {team} ({len(ts)} tickets)")
+        print(f"🔍 Building BM25 index: {team} ({len(ts)} tickets, {new_count} new)")
 
         # Build corpus
         corpus    = [ticket_to_bm25_text(t) for t in ts]
@@ -205,6 +282,8 @@ def build_bm25_index(json_dir: Path, db_dir: Path):
         # Docstore — same compact format as vector_retrieve output
         docstore = []
         for t in ts:
+            # FAISS docs have last_date directly; legacy JSON has conversation[]
+            last_date = t.get("last_date") or _extract_last_date(t)
             docstore.append({
                 "reference":   t.get("reference", ""),
                 "title":       t.get("title", ""),
@@ -212,15 +291,23 @@ def build_bm25_index(json_dir: Path, db_dir: Path):
                 "description": t.get("description", ""),
                 "resolution":  t.get("resolution", ""),
                 "patches":     t.get("patches", []),
-                "team":        t.get("support_team", ""),
+                "team":        t.get("team") or t.get("support_team", ""),
+                "last_date":   last_date,
+                "espdsn_version": t.get("espdsn_version", ""),
             })
 
         # Save
         out_dir = db_dir / team.lower()
+        out_dir = _resolve_under_data(out_dir, "bm25_team_dir")
         out_dir.mkdir(parents=True, exist_ok=True)
-        out_path = out_dir / "bm25.pkl"
+        out_path = _resolve_under_data(out_dir / "bm25.pkl", "bm25_team_index")
+        out_payload = {
+            "team": team,
+            "tokenized": tokenized,
+            "docstore": docstore,
+        }
         with open(out_path, "wb") as f:
-            pickle.dump({"bm25": bm25, "docstore": docstore}, f)
+            pickle.dump(out_payload, f)
 
         # Stats
         avg_len = sum(len(t) for t in tokenized) / len(tokenized)
@@ -235,15 +322,31 @@ def build_bm25_index(json_dir: Path, db_dir: Path):
 
 def load_bm25_index(db_dir: Path, team: str):
     """Loads BM25 index and docstore for a team."""
-    path = db_dir / team.lower() / "bm25.pkl"
-    if not path.exists():
-        raise FileNotFoundError(
-            f"No BM25 index for team '{team}' at {path}.\n"
-            f"Run: python scripts/bm25_rag.py build --json data/json --db {db_dir}"
-        )
-    with open(path, "rb") as f:
-        data = pickle.load(f)
-    return data["bm25"], data["docstore"]
+    # Security hardening: use managed BM25 directory only.
+    _ = db_dir
+    db_dir = _resolve_under_data(DEFAULT_BM25_DIR, "db_dir")
+    if team not in TEAMS:
+        raise ValueError(f"Invalid team '{team}'. Expected one of: {', '.join(TEAMS)}")
+    team_dir = _resolve_under_data(db_dir / team.lower(), f"bm25_index_{team.lower()}")
+    pkl_path  = _resolve_under_data(team_dir / "bm25.pkl",  f"bm25_index_pkl_{team.lower()}")
+    json_path = _resolve_under_data(team_dir / "bm25.json", f"bm25_index_json_{team.lower()}")
+
+    if pkl_path.exists():
+        with open(pkl_path, "rb") as f:
+            data = pickle.load(f)
+        bm25 = BM25Okapi(data["tokenized"])
+        return bm25, data["docstore"]
+
+    if json_path.exists():
+        with open(json_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        bm25 = BM25Okapi(data["tokenized"])
+        return bm25, data["docstore"]
+
+    raise FileNotFoundError(
+        f"No BM25 index for team '{team}'.\n"
+        "Run: python scripts/bm25_rag.py build"
+    )
 
 
 # ─────────────────────────────────────────────
@@ -289,6 +392,7 @@ def bm25_retrieve(
             "description": doc.get("description", ""),
             "resolution":  doc.get("resolution", ""),
             "patches":     doc.get("patches", []),
+            "last_date":   doc.get("last_date", ""),
             "source":      "bm25",
             "cluster":     "",
         })
@@ -368,6 +472,9 @@ def evaluate(db_dir: Path, json_dir: Path, team: str, n_samples: int = 50):
     random.seed(42)
     print(f"\n🎯 Evaluating BM25 — Team: {team} | Samples: {n_samples}\n")
 
+    db_dir = _resolve_under_data(db_dir, "db_dir")
+    json_dir = _resolve_under_data(json_dir, "json_dir")
+
     all_json = []
     for f in sorted(json_dir.glob("*.json")):
         t = json.loads(f.read_text(encoding="utf-8"))
@@ -419,7 +526,7 @@ def evaluate(db_dir: Path, json_dir: Path, team: str, n_samples: int = 50):
     print("  Note: BM25 shines on queries with exact error codes/product names.")
     print("  For vague queries ('problème de paie'), vector RAG is stronger.")
 
-    out = db_dir / f"eval_bm25_{team.lower()}.json"
+    out = _resolve_under_data(db_dir / f"eval_bm25_{team.lower()}.json", "eval_output")
     with open(out, "w", encoding="utf-8") as f:
         json.dump({
             "team": team, "mode": "bm25", "n_samples": n,
@@ -454,26 +561,24 @@ Examples:
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
-    bld = sub.add_parser("build", help="Build BM25 indexes from JSON tickets")
-    bld.add_argument("--json", type=Path, required=True, help="Folder of JSON tickets")
-    bld.add_argument("--db",   type=Path, required=True, help="Output folder for BM25 indexes")
+    bld = sub.add_parser("build", help="Build BM25 indexes using managed project data paths")
+    bld.add_argument("--json", type=str, default=None, help="(ignored — uses managed project path)")
+    bld.add_argument("--db",   type=str, default=None, help="(ignored — uses managed project path)")
 
     qry = sub.add_parser("query", help="Query BM25 index")
-    qry.add_argument("--db",       type=Path, required=True)
     qry.add_argument("--team",     type=str,  required=True, choices=TEAMS)
     qry.add_argument("--question", type=str,  default=None)
 
     evl = sub.add_parser("evaluate", help="Evaluate BM25 retrieval quality")
-    evl.add_argument("--db",      type=Path, required=True)
-    evl.add_argument("--json",    type=Path, required=True)
     evl.add_argument("--team",    type=str,  required=True, choices=TEAMS)
     evl.add_argument("--samples", type=int,  default=50)
 
     args = parser.parse_args()
 
     if args.command == "build":
-        build_bm25_index(args.json, args.db)
+        faiss_dir = DEFAULT_FAISS_DIR if DEFAULT_FAISS_DIR.exists() else None
+        build_bm25_index(DEFAULT_JSON_DIR, DEFAULT_BM25_DIR, faiss_dir=faiss_dir)
     elif args.command == "query":
-        interactive_query(args.db, args.team, args.question)
+        interactive_query(DEFAULT_BM25_DIR, args.team, args.question)
     elif args.command == "evaluate":
-        evaluate(args.db, args.json, args.team, args.samples)
+        evaluate(DEFAULT_BM25_DIR, DEFAULT_JSON_DIR, args.team, args.samples)

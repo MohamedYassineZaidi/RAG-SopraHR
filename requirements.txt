@@ -25,3 +25,23 @@ tiktoken
 
 # Environment variables
 python-dotenv
+
+# Scheduled jobs (weekly digest notifications)
+apscheduler
+
+# JSON Schema validation (optional but recommended)
+jsonschema
+
+# HTTP API server
+fastapi
+uvicorn[standard]
+python-multipart
+
+# Authentication
+python-jose[cryptography]
+passlib[bcrypt]
+pydantic[email]
+
+# MongoDB async driver
+motor
+pymongo

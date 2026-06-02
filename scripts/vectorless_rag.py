@@ -57,6 +57,7 @@ from rag_utils import (
 def build_pageindex(json_dir: Path, index_dir: Path):
     """
     Builds the 3-level PageIndex from JSON tickets and saves it to disk.
+    Incremental: skips rebuild if no new tickets detected.
 
     Output files:
       index_dir/pageindex.json   — full hierarchical index (all teams)
@@ -73,6 +74,27 @@ def build_pageindex(json_dir: Path, index_dir: Path):
             tickets.append(json.loads(f.read_text(encoding="utf-8")))
         except Exception as e:
             print(f"  ❌ {f.name}: {e}")
+
+    # --- Incremental: detect new tickets vs existing pageindex ---
+    existing_refs = set()
+    pi_path = index_dir / "pageindex.json"
+    if pi_path.exists():
+        try:
+            with open(pi_path, encoding="utf-8") as f:
+                old_pi = json.load(f)
+            for team_data in old_pi.values():
+                for cluster in team_data.get("clusters", {}).values():
+                    existing_refs.update(cluster.get("refs", []))
+        except Exception:
+            pass
+
+    all_refs = {t.get("reference", "") for t in tickets}
+    new_refs = all_refs - existing_refs
+    if not new_refs:
+        print(f"  ✅ PageIndex is up-to-date, no new tickets")
+        return old_pi if pi_path.exists() else {}
+
+    print(f"  {len(new_refs)} new tickets detected, rebuilding PageIndex...")
 
     pageindex = {}
 

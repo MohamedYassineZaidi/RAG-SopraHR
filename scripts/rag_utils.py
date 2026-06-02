@@ -34,12 +34,13 @@ import boto3
 # CONFIGURATION
 # ─────────────────────────────────────────────
 
-EMBEDDING_MODEL = "paraphrase-multilingual-mpnet-base-v2"
-EMBEDDING_DIM   = 768
-BEDROCK_MODEL   = "anthropic.claude-3-haiku-20240307-v1:0"
+EMBEDDING_MODEL = "intfloat/multilingual-e5-large"
+EMBEDDING_DIM   = 1024
+BEDROCK_MODEL   = os.getenv("BEDROCK_MODEL_ID", "anthropic.claude-3-haiku-20240307-v1:0")
 BEDROCK_REGION  = os.getenv("AWS_DEFAULT_REGION", "eu-west-1")
-TOP_K           = 5
-RRF_K           = 60   # Reciprocal Rank Fusion constant
+TOP_K           = 7    # final number of hits returned to the agent
+RETRIEVAL_K     = 25   # candidates fetched per retriever before fusion
+RRF_K           = 30   # Reciprocal Rank Fusion constant (lower = sharper ranking)
 TEAMS           = ["DSN", "Appli", "Outils"]
 
 
