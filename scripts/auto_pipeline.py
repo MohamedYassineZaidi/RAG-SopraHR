@@ -15,6 +15,7 @@ Then it runs:
 - rag_assistant.build_indexes
 - bm25_rag.build_bm25_index
 - vectorless_rag.build_pageindex
+- import_tickets.import_tickets (MongoDB upsert)
 
 Examples
 --------
@@ -31,6 +32,7 @@ Watch mode (polling):
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import re
 import sys
@@ -42,12 +44,16 @@ from typing import Any
 _SCRIPTS = Path(__file__).parent
 if str(_SCRIPTS) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS))
+_ROOT = _SCRIPTS.parent
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
 
 from tickets_pipeline import load_excel_mapping, process_raw_file
 from txt_to_json import convert_all
 from vector_rag import build_indexes
 from bm25_rag import build_bm25_index
 from vectorless_rag import build_pageindex
+from import_tickets import import_tickets as _run_mongo_import
 
 
 ROOT = _SCRIPTS.parent
@@ -191,6 +197,14 @@ def _rebuild_all_indexes(
 
     _log("[rebuild] Building PageIndex")
     build_pageindex(json_dir, pageindex_dir)
+
+    _log("[rebuild] Importing tickets into MongoDB")
+    try:
+        asyncio.run(_run_mongo_import())
+        _log("[rebuild] MongoDB import complete")
+    except Exception as exc:  # non-fatal: RAG indexes still work without MongoDB
+        _log(f"[rebuild] MongoDB import failed (non-fatal): {exc}")
+
     _log("[rebuild] All indexes updated successfully")
 
 

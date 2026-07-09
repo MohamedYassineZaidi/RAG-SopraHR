@@ -242,7 +242,6 @@ _EMPTY_OUTPUT: dict = {
     "tickets_utilises": [],
     "cause_probable": "",
     "resolution": "",
-    "tickets_references": [],
     "patches": [],
     "reponse_lotus": "",
 }
@@ -308,6 +307,7 @@ def _enforce_rank1_resolution(result: dict) -> dict:
             if p and p not in seen_patches:
                 seen_patches.add(p)
                 patch_objects.append({"patch": p, "ref": ref})
+                
     if patch_objects:
         result["patches"] = patch_objects
     else:

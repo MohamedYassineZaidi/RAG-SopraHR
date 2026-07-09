@@ -66,7 +66,7 @@ from vectorless_rag import (
     CLUSTER_SELECTION_PROMPT,
     TICKET_SELECTION_PROMPT,
 )
-from bm25_rag import load_bm25_index, bm25_retrieve
+from bm25_rag import load_bm25_index, bm25_retrieve, _resolve_under_data
 from hybrid_rag import (
     load_vector_index,
     vector_retrieve,
@@ -394,10 +394,10 @@ Examples:
     args = parser.parse_args()
 
     evaluate_hybrid(
-        index_dir=args.index,
-        db_dir=args.db,
-        bm25_dir=args.bm25,
-        json_dir=args.json,
+        index_dir=_resolve_under_data(args.index, "--index"),
+        db_dir=_resolve_under_data(args.db, "--db"),
+        bm25_dir=_resolve_under_data(args.bm25, "--bm25"),
+        json_dir=_resolve_under_data(args.json, "--json"),
         team=args.team,
         n_samples=args.samples,
         relevance_threshold=args.threshold,

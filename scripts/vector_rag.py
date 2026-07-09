@@ -55,6 +55,21 @@ BEDROCK_REGION = os.getenv("AWS_DEFAULT_REGION", "eu-west-1")
 
 TOP_K = 5
 
+_SCRIPTS = Path(__file__).parent
+_ROOT    = _SCRIPTS.parent
+_DATA    = _ROOT / "data"
+
+
+def _resolve_under_data(path: Path, arg_name: str) -> Path:
+    """Resolve path and ensure it stays inside the project data/ directory."""
+    resolved = Path(path).expanduser().resolve(strict=False)
+    base = _DATA.resolve()
+    try:
+        resolved.relative_to(base)
+    except ValueError as exc:
+        raise ValueError(f"{arg_name} must be under {base}: {resolved}") from exc
+    return resolved
+
 
 # ─────────────────────────────────────────────
 # 1. BEDROCK CLIENT
@@ -95,7 +110,7 @@ def call_bedrock(client, prompt: str, max_tokens: int = 1024) -> str:
 # ─────────────────────────────────────────────
 
 def save_index(db_path: str, index, docstore: list):
-    db = Path(db_path)
+    db = _resolve_under_data(Path(db_path), "db_path")
     db.mkdir(parents=True, exist_ok=True)
     faiss.write_index(index, str(db / "index.faiss"))
     with open(db / "docstore.pkl", "wb") as f:
@@ -106,7 +121,7 @@ def save_index(db_path: str, index, docstore: list):
 
 
 def load_index(db_path: str):
-    db = Path(db_path)
+    db = _resolve_under_data(Path(db_path), "db_path")
     if not (db / "index.faiss").exists():
         raise FileNotFoundError(f"No FAISS index at '{db_path}'. Run: python vector_rag.py index --tickets ... --db {db_path}")
     index    = faiss.read_index(str(db / "index.faiss"))

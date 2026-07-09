@@ -358,8 +358,8 @@ async def get_analysis_history_endpoint(
         raise HTTPException(status_code=404, detail="User not found")
     
     print(f"[DEBUG] User found: {user.username}")
-    history, total = await get_user_analysis_history(user_id, limit=limit, skip=skip)
-    print(f"[DEBUG] Found {len(history)} analysis entries for user {user_id}")
+    history, total = await get_user_analysis_history(str(user.id), limit=limit, skip=skip)
+    print(f"[DEBUG] Found {len(history)} analysis entries for user {user.id}")
     return history
 
 
@@ -368,15 +368,20 @@ async def get_analysis_entry_endpoint(user_id: str, analysis_id: str):
     """Get a specific analysis entry."""
     from scripts.database import _db
     from bson import ObjectId
-    
+
+    resolved_user = await get_user_by_id(user_id)
+    if not resolved_user:
+        raise HTTPException(status_code=404, detail="User not found")
+    resolved_uid = str(resolved_user.id)
+
     history_collection = _db["analysis_history"]
     try:
-        doc = await history_collection.find_one({"_id": ObjectId(analysis_id), "user_id": user_id})
+        doc = await history_collection.find_one({"_id": ObjectId(analysis_id), "user_id": resolved_uid})
         if doc:
             return AnalysisHistory(**doc)
-    except:
+    except Exception:
         pass
-    
+
     raise HTTPException(status_code=404, detail="Analysis entry not found")
 
 
@@ -387,7 +392,9 @@ async def update_analysis_entry_endpoint(
     update_data: AnalysisHistoryUpdate
 ):
     """Update analysis entry (rating, tags)."""
-    entry = await update_analysis_entry(analysis_id, user_id, update_data.dict(exclude_unset=True))
+    resolved_user = await get_user_by_id(user_id)
+    resolved_uid = str(resolved_user.id) if resolved_user else user_id
+    entry = await update_analysis_entry(analysis_id, resolved_uid, update_data.dict(exclude_unset=True))
     if not entry:
         raise HTTPException(status_code=404, detail="Analysis entry not found")
     return entry
@@ -396,8 +403,10 @@ async def update_analysis_entry_endpoint(
 @router.delete("/users/{user_id}/analysis/{analysis_id}", response_model=MessageResponse)
 async def delete_analysis_entry_endpoint(user_id: str, analysis_id: str):
     """Delete a history entry."""
-    print(f"[DEBUG DELETE] user_id={user_id}, analysis_id={analysis_id}")
-    success = await delete_analysis_entry(analysis_id, user_id)
+    resolved_user = await get_user_by_id(user_id)
+    resolved_uid = str(resolved_user.id) if resolved_user else user_id
+    print(f"[DEBUG DELETE] resolved_uid={resolved_uid}, analysis_id={analysis_id}")
+    success = await delete_analysis_entry(analysis_id, resolved_uid)
     print(f"[DEBUG DELETE] success={success}")
     if not success:
         raise HTTPException(status_code=404, detail="Analysis entry not found")

@@ -70,6 +70,7 @@ from vectorless_rag import (
 from bm25_rag import (
     load_bm25_index,
     bm25_retrieve,
+    _resolve_under_data,
 )
 
 
@@ -78,7 +79,7 @@ from bm25_rag import (
 # ─────────────────────────────────────────────
 
 def load_vector_index(db_dir: Path, team: str):
-    p = db_dir / team.lower()
+    p = _resolve_under_data(db_dir / team.lower(), "db_dir")
     if not (p / "index.faiss").exists():
         raise FileNotFoundError(
             f"No vector index for '{team}' at {p}.\n"

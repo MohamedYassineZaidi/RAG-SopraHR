@@ -335,6 +335,7 @@ async def create_user(
         "password_hash": password_hash,
         "role": role,
         "team": user_data.team,
+        "must_change_password": True,
         "created_at": now,
         "updated_at": now,
         "favorite_tickets": [],
@@ -358,14 +359,19 @@ async def get_user_by_username(username: str) -> Optional[User]:
 
 
 async def get_user_by_id(user_id: str) -> Optional[User]:
-    """Fetch user by MongoDB _id."""
+    """Fetch user by MongoDB _id, or fall back to email lookup for legacy sessions."""
     users = _db["users"]
     try:
         doc = await users.find_one({"_id": ObjectId(user_id)})
         if doc:
             return User(**_str_id(doc))
-    except:
+    except Exception:
         pass
+    # Fallback: treat user_id as an email (old localStorage sessions before id was added to login response)
+    if "@" in user_id:
+        doc = await users.find_one({"email": user_id.lower()})
+        if doc:
+            return User(**_str_id(doc))
     return None
 
 

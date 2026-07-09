@@ -23,10 +23,15 @@ import secrets
 import subprocess
 import re
 import os
+import smtplib
+import ssl
+import http.client
+import certifi
 from uuid import uuid4
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Literal, Optional
+from email.message import EmailMessage
 
 from fastapi import FastAPI, HTTPException, Depends, UploadFile, File, Form, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
@@ -35,6 +40,7 @@ from pydantic import BaseModel, EmailStr, Field, ValidationError
 from dotenv import load_dotenv
 from jose import JWTError, jwt
 from passlib.context import CryptContext
+from bson import ObjectId
 
 load_dotenv()
 
@@ -45,6 +51,22 @@ load_dotenv()
 _JWT_SECRET = os.getenv("JWT_SECRET", secrets.token_hex(32))
 _JWT_ALGORITHM = os.getenv("JWT_ALGORITHM", "HS256")
 _JWT_EXPIRE_HOURS = int(os.getenv("JWT_EXPIRE_HOURS", "8"))
+
+_BREVO_API_KEY = os.getenv("BREVO_API_KEY", "").strip()
+# EMAIL_VERIFY_SSL=false disables TLS cert verification for corporate TLS-inspection proxies.
+# Value is a startup constant loaded from env — never derived from HTTP request input.
+_EMAIL_VERIFY_SSL: bool = os.getenv("EMAIL_VERIFY_SSL", "true").strip().lower() != "false"
+_SMTP_HOST = os.getenv("SMTP_HOST", "").strip()
+_SMTP_PORT = int(os.getenv("SMTP_PORT", "587").strip())
+_SMTP_USER = os.getenv("SMTP_USER", "").strip()
+_SMTP_PASSWORD = (os.getenv("SMTP_PASSWORD") or os.getenv("SMTP_PASS", "")).strip()
+_SMTP_FROM = os.getenv("SMTP_FROM", _SMTP_USER).strip()
+_APP_LOGIN_URL = os.getenv("APP_LOGIN_URL", "http://localhost:3000").strip()
+_ACCESS_REQUEST_ADMIN_EMAILS = [
+    e.strip().lower()
+    for e in os.getenv("ACCESS_REQUEST_ADMIN_EMAILS", "").split(",")
+    if e.strip()
+]
 
 # Use PBKDF2 to avoid bcrypt's 72-byte input constraint and backend quirks.
 _pwd_ctx = CryptContext(schemes=["pbkdf2_sha256"], deprecated="auto")
@@ -62,6 +84,247 @@ def _load_users() -> dict:
 def _save_users(users: dict) -> None:
     _USERS_FILE.parent.mkdir(parents=True, exist_ok=True)
     _USERS_FILE.write_text(json.dumps(users, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+_BREVO_HOST = "api.brevo.com"
+_BREVO_PATH = "/v3/smtp/email"
+_BREVO_KEY_RE = re.compile(r'^xkeysib-[A-Za-z0-9\-]+$')
+
+
+def _validated_brevo_key(key: str) -> str:
+    """Validate the Brevo API key format before use in HTTP headers."""
+    if not _BREVO_KEY_RE.match(key):
+        raise RuntimeError("BREVO_API_KEY format invalide")
+    return key
+
+
+def _sanitize_email_field(value: str, max_len: int = 500) -> str:
+    """Strip control characters and limit length for email payload fields."""
+    cleaned = re.sub(r'[\x00-\x1f\x7f]', '', value)
+    return cleaned[:max_len]
+
+
+def _send_email_brevo_api(to_emails: list[str], subject: str, text_body: str, html_body: str = None) -> None:
+    """Send via Brevo REST API on HTTPS port 443 — firewall-friendly."""
+    if not _BREVO_API_KEY:
+        raise RuntimeError("BREVO_API_KEY non configuré")
+    if not _SMTP_FROM:
+        raise RuntimeError("SMTP_FROM non configuré")
+
+    safe_key = _validated_brevo_key(_BREVO_API_KEY)
+
+    data: dict = {
+        "sender": {"email": _sanitize_email_field(_SMTP_FROM, 200), "name": "SopraHR"},
+        "to": [{"email": _sanitize_email_field(e, 200)} for e in to_emails],
+        "subject": _sanitize_email_field(subject, 200),
+        "textContent": _sanitize_email_field(text_body, 5000),
+    }
+    if html_body:
+        data["htmlContent"] = html_body
+
+    payload = json.dumps(data).encode("utf-8")
+
+    # Use certifi CA bundle; if corporate TLS-inspection proxy is present,
+    # EMAIL_VERIFY_SSL=false in .env disables verification (startup constant only).
+    ctx = ssl.create_default_context(cafile=certifi.where())
+    if not _EMAIL_VERIFY_SSL:
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+    conn = http.client.HTTPSConnection(_BREVO_HOST, context=ctx, timeout=30)
+    try:
+        conn.request(
+            "POST",
+            _BREVO_PATH,
+            body=payload,
+            headers={
+                "accept": "application/json",
+                "api-key": safe_key,
+                "content-type": "application/json",
+            },
+        )
+        resp = conn.getresponse()
+        if resp.status not in (200, 201):
+            body_err = resp.read().decode("utf-8", errors="replace")
+            raise RuntimeError(f"Brevo API error {resp.status}: {body_err}")
+    finally:
+        conn.close()
+
+
+def _ensure_smtp_configured() -> None:
+    missing = []
+    if not _SMTP_HOST:
+        missing.append("SMTP_HOST")
+    if not _SMTP_USER:
+        missing.append("SMTP_USER")
+    if not _SMTP_PASSWORD:
+        missing.append("SMTP_PASSWORD")
+    if not _SMTP_FROM:
+        missing.append("SMTP_FROM")
+    if missing:
+        raise RuntimeError(f"Configuration SMTP incomplète: {', '.join(missing)}")
+    if _SMTP_PASSWORD.lower() in {"your_brevo_smtp_key", "changeme", "change_me", "password"}:
+        raise RuntimeError("SMTP_PASSWORD est un placeholder. Renseignez votre vraie cle SMTP Brevo")
+
+
+def _send_email(to_emails: list[str], subject: str, text_body: str, html_body: str = None) -> None:
+    if not to_emails:
+        raise RuntimeError("Aucun destinataire e-mail fourni")
+
+    # Prefer Brevo REST API (HTTPS/443) — bypasses SMTP port firewall restrictions.
+    if _BREVO_API_KEY:
+        _send_email_brevo_api(to_emails, subject, text_body, html_body)
+        return
+
+    # Fallback: plain SMTP
+    _ensure_smtp_configured()
+
+    msg = EmailMessage()
+    msg["From"] = _SMTP_FROM
+    msg["To"] = ", ".join(to_emails)
+    msg["Subject"] = subject
+    msg.set_content(text_body)
+    if html_body:
+        msg.add_alternative(html_body, subtype="html")
+
+    with smtplib.SMTP(_SMTP_HOST, _SMTP_PORT, timeout=20) as server:
+        server.ehlo()
+        server.starttls()
+        server.ehlo()
+        server.login(_SMTP_USER, _SMTP_PASSWORD)
+        server.send_message(msg)
+
+
+# ─────────────────────────────────────────────
+# EMAIL HTML TEMPLATES
+# ─────────────────────────────────────────────
+
+def _email_base(title: str, content_html: str) -> str:
+    return f"""<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>{title}</title>
+</head>
+<body style="margin:0;padding:0;background:#f4f0ff;font-family:'Segoe UI',Arial,sans-serif;">
+  <table width="100%" cellpadding="0" cellspacing="0" style="background:#f4f0ff;padding:40px 0;">
+    <tr><td align="center">
+      <table width="600" cellpadding="0" cellspacing="0" style="max-width:600px;width:100%;">
+
+        <!-- HEADER -->
+        <tr>
+          <td style="background:#2E0249;border-radius:12px 12px 0 0;padding:32px 40px;text-align:center;">
+            <p style="margin:0 0 4px 0;font-size:11px;font-weight:700;letter-spacing:4px;text-transform:uppercase;color:#FD8D14;">SOPRA HR SOFTWARE</p>
+            <p style="margin:0;font-size:22px;font-weight:700;color:#ffffff;">{title}</p>
+          </td>
+        </tr>
+
+        <!-- BODY -->
+        <tr>
+          <td style="background:#ffffff;padding:36px 40px;">
+            {content_html}
+          </td>
+        </tr>
+
+        <!-- FOOTER -->
+        <tr>
+          <td style="background:#f4f0ff;border-radius:0 0 12px 12px;padding:24px 40px;text-align:center;">
+            <p style="margin:0;font-size:11px;color:#9e8ab0;">Cet e-mail a été envoyé automatiquement par la plateforme SopraHR &mdash; ne pas répondre.</p>
+            <p style="margin:8px 0 0;font-size:10px;color:#c0b0d0;letter-spacing:2px;text-transform:uppercase;">Sopra HR Software &bull; Accès Sécurisé &bull; ISO 27001</p>
+          </td>
+        </tr>
+
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>"""
+
+
+def _row(label: str, value: str) -> str:
+    return f"""
+    <tr>
+      <td style="padding:10px 16px;font-size:12px;font-weight:700;color:#7c5ca3;text-transform:uppercase;letter-spacing:1px;white-space:nowrap;width:130px;">{label}</td>
+      <td style="padding:10px 16px;font-size:14px;color:#2E0249;border-left:2px solid #f0e8ff;">{value}</td>
+    </tr>"""
+
+
+def _send_access_request_email(name: str, email: str, team: str) -> None:
+    if not _ACCESS_REQUEST_ADMIN_EMAILS:
+        raise RuntimeError("ACCESS_REQUEST_ADMIN_EMAILS n'est pas configuré")
+
+    subject = f"[SopraHR] Nouvelle demande d'accès — {name}"
+    date_str = datetime.utcnow().strftime("%d/%m/%Y à %H:%M UTC")
+
+    text_body = (
+        f"Nouvelle demande d'accès\n\nNom: {name}\nE-mail: {email}\nÉquipe: {team}\nDate: {date_str}\n\n"
+        "Action requise: créer le compte via le panneau Admin."
+    )
+
+    content = f"""
+    <p style="margin:0 0 24px;font-size:15px;color:#4a3060;line-height:1.6;">
+      Une nouvelle demande d&rsquo;accès a été soumise et attend votre traitement.
+    </p>
+
+    <table width="100%" cellpadding="0" cellspacing="0"
+           style="border:1px solid #e8dff5;border-radius:8px;overflow:hidden;margin-bottom:28px;">
+      <tbody>
+        {_row('Nom', name)}
+        {_row('E-mail', f'<a href="mailto:{email}" style="color:#7c5ca3;text-decoration:none;">{email}</a>')}
+        {_row('&Eacute;quipe', f'<span style="background:#f0e8ff;color:#2E0249;padding:2px 10px;border-radius:20px;font-weight:600;">{team}</span>')}
+        {_row('Date', date_str)}
+      </tbody>
+    </table>
+
+    <div style="text-align:center;">
+      <a href="{_APP_LOGIN_URL}" style="display:inline-block;background:#FD8D14;color:#ffffff;font-weight:700;font-size:13px;letter-spacing:1px;text-transform:uppercase;padding:14px 32px;border-radius:6px;text-decoration:none;">Ouvrir le panneau Admin</a>
+    </div>
+    <p style="margin:24px 0 0;font-size:12px;color:#9e8ab0;text-align:center;">Connectez-vous et allez dans Admin &rsaquo; Gestion des utilisateurs pour créer le compte.</p>
+    """
+
+    _send_email(_ACCESS_REQUEST_ADMIN_EMAILS, subject, text_body, _email_base("Nouvelle demande d'accès", content))
+
+
+def _send_account_created_email(name: str, email: str, team: str, role: str, password: str, created_by: str) -> None:
+    subject = "[SopraHR] Votre compte a été créé"
+
+    text_body = (
+        f"Bonjour {name},\n\nVotre compte SopraHR a été créé par un administrateur.\n\n"
+        f"E-mail: {email}\nMot de passe temporaire: {password}\nÉquipe: {team}\nRôle: {role}\n\n"
+        f"Connectez-vous sur: {_APP_LOGIN_URL}\n"
+        "Changez votre mot de passe dès la première connexion."
+    )
+
+    content = f"""
+    <p style="margin:0 0 8px;font-size:18px;font-weight:700;color:#2E0249;">Bienvenue, {name}&nbsp;!</p>
+    <p style="margin:0 0 24px;font-size:14px;color:#4a3060;line-height:1.6;">
+      Votre compte sur la plateforme <strong>SopraHR</strong> a été créé par un administrateur.
+      Vous pouvez maintenant vous connecter avec les identifiants ci-dessous.
+    </p>
+
+    <table width="100%" cellpadding="0" cellspacing="0"
+           style="border:1px solid #e8dff5;border-radius:8px;overflow:hidden;margin-bottom:28px;">
+      <tbody>
+        {_row('E-mail', f'<a href="mailto:{email}" style="color:#7c5ca3;text-decoration:none;">{email}</a>')}
+        {_row('Mot de passe', f'<span style="font-family:monospace;font-size:15px;background:#f5f0fb;padding:2px 10px;border-radius:4px;letter-spacing:1px;">{password}</span>')}
+        {_row('&Eacute;quipe', f'<span style="background:#f0e8ff;color:#2E0249;padding:2px 10px;border-radius:20px;font-weight:600;">{team}</span>')}
+        {_row('R&ocirc;le', role)}
+      </tbody>
+    </table>
+
+    <div style="background:#fff8f0;border:1px solid #fde4c0;border-radius:8px;padding:16px 20px;margin-bottom:28px;">
+      <p style="margin:0;font-size:13px;color:#c0640a;">
+        <strong>&#9888;&nbsp;Action requise&nbsp;:</strong> Veuillez vous connecter et <strong>changer votre mot de passe</strong> dès la première connexion.
+      </p>
+    </div>
+
+    <div style="text-align:center;">
+      <a href="{_APP_LOGIN_URL}" style="display:inline-block;background:#2E0249;color:#ffffff;font-weight:700;font-size:13px;letter-spacing:1px;text-transform:uppercase;padding:14px 32px;border-radius:6px;text-decoration:none;">Se connecter</a>
+    </div>
+    <p style="margin:24px 0 0;font-size:12px;color:#9e8ab0;text-align:center;">Compte créé par&nbsp;: {created_by}</p>
+    """
+
+    _send_email([email], subject, text_body, _email_base("Votre compte a été créé", content))
 
 def _create_token(email: str, name: str, role: str = "CONSULTANT") -> str:
     payload = {
@@ -398,11 +661,10 @@ class QueryResponse(BaseModel):
     reponse_lotus: str = ""
 
 
-class SignupRequest(BaseModel):
-    name: str
-    email: str
-    password: str
-    team: Literal["DSN", "Appli", "Outils"] = "DSN"
+class AccessRequestRequest(BaseModel):
+    name: str = Field(..., min_length=3, max_length=80)
+    email: EmailStr
+    team: Literal["DSN", "Appli", "Outils"]
 
 
 class LoginRequest(BaseModel):
@@ -421,10 +683,17 @@ class DeleteAccountRequest(BaseModel):
 
 class AuthResponse(BaseModel):
     token: str
+    id: str
     name: str
     email: str
-    team: str
+    team: Optional[str] = None
     role: str
+    must_change_password: bool = False
+
+
+class AccessRequestResponse(BaseModel):
+    status: str
+    message: str
 
 
 # ─────────────────────────────────────────────
@@ -440,22 +709,42 @@ def health():
 # AUTH ROUTES
 # ─────────────────────────────────────────────
 
-@app.post("/auth/signup", response_model=AuthResponse)
-async def signup(body: SignupRequest):
+@app.post("/auth/signup", response_model=AccessRequestResponse)
+@app.post("/auth/request-access", response_model=AccessRequestResponse)
+async def request_access(body: AccessRequestRequest):
     existing = await get_user_raw_by_email(body.email)
     if existing:
         raise HTTPException(status_code=409, detail="Un compte existe déjà avec cet e-mail")
-    if len(body.password) < 8:
-        raise HTTPException(status_code=400, detail="Le mot de passe doit contenir au moins 8 caractères")
 
-    password_hash = _pwd_ctx.hash(body.password)
-    user_data = UserCreate(username=body.name, email=body.email, team=body.team, password=body.password)
-    await db_create_user(user_data, password_hash, role="CONSULTANT")
+    try:
+        _send_access_request_email(body.name, body.email, body.team)
+    except RuntimeError as exc:
+        print(f"[WARN] Access request config error for {body.email}: {exc}")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    except Exception as exc:
+        print(f"[WARN] Access request email failed for {body.email}: {exc}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Envoi e-mail echoue: {exc}",
+        ) from exc
 
-    token = _create_token(body.email, body.name, "CONSULTANT")
-    _log_audit_sync("signup", actor_email=body.email, actor_role="CONSULTANT",
-                    details={"name": body.name, "team": body.team})
-    return AuthResponse(token=token, name=body.name, email=body.email, team=body.team, role="CONSULTANT")
+    _push_admin_notification(
+        "info",
+        "admin",
+        "Nouvelle demande d'acces",
+        f"{body.name} ({body.email}) demande un acces pour l'equipe {body.team}.",
+        "admin",
+    )
+    _log_audit_sync(
+        "access_request_submitted",
+        actor_email=body.email,
+        actor_role="CONSULTANT",
+        details={"name": body.name, "team": body.team},
+    )
+    return AccessRequestResponse(
+        status="ok",
+        message="Votre demande d'acces a ete envoyee. Un administrateur va creer votre compte.",
+    )
 
 
 @app.post("/auth/login", response_model=AuthResponse)
@@ -474,9 +763,24 @@ async def login(body: LoginRequest):
     name = doc.get("username") or doc.get("name") or body.email.split("@")[0]
     role = doc.get("role") or "CONSULTANT"
     team = doc.get("team")
+    must_change_password = bool(doc.get("must_change_password", False))
+    user_id = doc.get("_id", body.email)
     token = _create_token(body.email, name, role)
     _log_audit_sync("login", actor_email=body.email, actor_role=role)
-    return AuthResponse(token=token, name=name, email=body.email, team=team, role=role)
+    # Record last login timestamp
+    try:
+        await db_update_user(str(user_id), {"last_login": datetime.utcnow()})
+    except Exception:
+        pass
+    return AuthResponse(
+        token=token,
+        id=str(user_id),
+        name=name,
+        email=body.email,
+        team=team,
+        role=role,
+        must_change_password=must_change_password,
+    )
 
 
 @app.post("/auth/logout")
@@ -487,46 +791,53 @@ def logout(user: dict = Depends(_verify_token)):
 
 
 @app.get("/auth/me")
-def me(user: dict = Depends(_verify_token)):
+async def me(user: dict = Depends(_verify_token)):
     email = user["sub"]
-    users = _load_users()
-    user_data = users.get(email)
-    
-    if not user_data:
+    doc = await get_user_raw_by_email(email)
+
+    if not doc:
         return {
             "email": email,
             "name": email.split("@")[0],
             "team": "DSN",
             "role": user.get("role", "CONSULTANT"),
-            "id": email
+            "id": email,
+            "last_login": None,
+            "created_at": None,
+            "must_change_password": False,
         }
-    
+
+    last_login = doc.get("last_login")
+    created_at = doc.get("created_at")
+
     return {
         "email": email,
-        "name": user_data.get("name", ""),
-        "team": user_data.get("team", ""),
-        "role": user_data.get("role", "CONSULTANT"),
-        "id": email
+        "name": doc.get("username") or doc.get("name") or email.split("@")[0],
+        "team": doc.get("team") or "",
+        "role": doc.get("role") or "CONSULTANT",
+        "id": doc.get("_id") or email,
+        "last_login": last_login.isoformat() + "Z" if hasattr(last_login, "isoformat") else last_login,
+        "created_at": created_at.isoformat() + "Z" if hasattr(created_at, "isoformat") else created_at,
+        "must_change_password": bool(doc.get("must_change_password", False)),
     }
 
 
 @app.post("/auth/change-password")
-def change_password(body: ChangePasswordRequest, user: dict = Depends(_verify_token)):
+async def change_password(body: ChangePasswordRequest, user: dict = Depends(_verify_token)):
     email = user.get("sub", "")
-    users = _load_users()
-    user_data = users.get(email)
-    if not user_data:
+    doc = await get_user_raw_by_email(email)
+    if not doc:
         raise HTTPException(status_code=404, detail="Utilisateur introuvable")
 
-    if not _pwd_ctx.verify(body.current_password, user_data.get("hashed_password", "")):
+    stored_hash = doc.get("password_hash") or doc.get("hashed_password", "")
+    if not stored_hash or not _pwd_ctx.verify(body.current_password, stored_hash):
         raise HTTPException(status_code=400, detail="Mot de passe actuel incorrect")
 
     if len(body.new_password) < 8:
         raise HTTPException(status_code=400, detail="Le nouveau mot de passe doit contenir au moins 8 caractères")
 
-    user_data["hashed_password"] = _pwd_ctx.hash(body.new_password)
-    users[email] = user_data
-    _save_users(users)
+    new_hash = _pwd_ctx.hash(body.new_password)
+    await db_update_user(doc["_id"], {"password_hash": new_hash, "must_change_password": False})
     _log_audit_sync("settings_changed", actor_email=email, actor_role=user.get("role", "CONSULTANT"),
                     details={"field": "password"})
     return {"status": "ok", "message": "Mot de passe mis à jour"}
@@ -571,31 +882,26 @@ async def export_my_data(user: dict = Depends(_verify_token)):
 
 @app.post("/auth/delete-account")
 async def delete_my_account(body: DeleteAccountRequest, user: dict = Depends(_verify_token)):
-    """Delete current account from auth store and MongoDB data tied to this user."""
+    """Delete current account from MongoDB."""
     email = user.get("sub", "")
-    users = _load_users()
-    user_data = users.get(email)
-    if not user_data:
+    doc = await get_user_raw_by_email(email)
+    if not doc:
         raise HTTPException(status_code=404, detail="Utilisateur introuvable")
 
-    if not _pwd_ctx.verify(body.current_password, user_data.get("hashed_password", "")):
+    stored_hash = doc.get("password_hash") or doc.get("hashed_password", "")
+    if not stored_hash or not _pwd_ctx.verify(body.current_password, stored_hash):
         raise HTTPException(status_code=400, detail="Mot de passe actuel incorrect")
 
-    users.pop(email, None)
-    _save_users(users)
-
+    user_id = str(doc["_id"])
     from motor.motor_asyncio import AsyncIOMotorClient
-    client = AsyncIOMotorClient(os.getenv("MONGODB_URL", "mongodb://localhost:27017"))
+    _client = AsyncIOMotorClient(os.getenv("MONGODB_URL", "mongodb://localhost:27017"))
     try:
-        db = client[os.getenv("MONGODB_DB", "soprahr_rag")]
-        mongo_user = await db["users"].find_one({"email": email})
-        if mongo_user:
-            user_id = str(mongo_user.get("_id"))
-            await db["analysis_history"].delete_many({"user_id": user_id})
-            await db["notifications"].delete_many({"user_id": user_id})
-        await db["users"].delete_many({"email": email})
+        _db = _client[os.getenv("MONGODB_DB", "soprahr_rag")]
+        await _db["analysis_history"].delete_many({"user_id": user_id})
+        await _db["notifications"].delete_many({"user_id": user_id})
+        await _db["users"].delete_one({"email": email})
     finally:
-        client.close()
+        _client.close()
 
     _log_audit_sync("user_deleted", actor_email=email, actor_role=user.get("role", "CONSULTANT"),
                     target_type="user", details={"email": email})
@@ -609,11 +915,28 @@ async def delete_my_account(body: DeleteAccountRequest, user: dict = Depends(_ve
 VALID_ROLES = ("ADMIN", "MANAGER", "TEAM_LEAD", "CONSULTANT")
 
 
+def _subordinate_user_query(actor_role: str, actor_team: Optional[str]) -> dict:
+    """Return MongoDB query for users visible under the actor's hierarchy."""
+    if actor_role == "ADMIN":
+        return {}
+    if actor_role == "MANAGER":
+        return {
+            "role": {"$in": ["MANAGER", "TEAM_LEAD", "CONSULTANT"]},
+        }
+    if actor_role == "TEAM_LEAD":
+        return {
+            "team": actor_team,
+            "role": "CONSULTANT",
+        }
+    # CONSULTANT: self-only (handled by caller when needed)
+    return {"_id": "__none__"}
+
+
 class AdminCreateUserRequest(BaseModel):
     name: str = Field(..., min_length=3, max_length=50)
     email: EmailStr
     password: str = Field(..., min_length=8)
-    team: Literal["DSN", "Appli", "Outils"] = "DSN"
+    team: Optional[Literal["DSN", "Appli", "Outils"]] = None
     role: Literal["ADMIN", "MANAGER", "TEAM_LEAD", "CONSULTANT"] = "CONSULTANT"
 
 
@@ -661,9 +984,30 @@ def _log_audit_sync(action: str, actor_email: str, actor_role: str = "CONSULTANT
 
 
 @app.get("/admin/users")
-async def admin_list_users(user: dict = Depends(_require_role("ADMIN", "MANAGER"))):
-    """List all users. ADMIN/MANAGER only."""
-    db_users = await db_get_all_users(limit=500)
+async def admin_list_users(user: dict = Depends(_require_role("ADMIN", "MANAGER", "TEAM_LEAD"))):
+    """List users based on hierarchy visibility.
+
+    ADMIN: all users
+    MANAGER: TEAM_LEAD + CONSULTANT in same team
+    TEAM_LEAD: CONSULTANT in same team
+    """
+    role = user.get("role", "CONSULTANT")
+    actor_email = user.get("sub", "")
+    actor_doc = await get_user_raw_by_email(actor_email)
+    actor_team = (actor_doc or {}).get("team")
+
+    db_users = await db_get_all_users(limit=1000)
+    if role == "MANAGER":
+        db_users = [
+            u for u in db_users
+            if u.role in ("MANAGER", "TEAM_LEAD", "CONSULTANT")
+        ]
+    elif role == "TEAM_LEAD":
+        db_users = [
+            u for u in db_users
+            if u.team == actor_team and u.role == "CONSULTANT"
+        ]
+
     return [
         {
             "id": u.id,
@@ -683,14 +1027,42 @@ async def admin_create_user(body: AdminCreateUserRequest, user: dict = Depends(_
     existing = await get_user_by_email(body.email)
     if existing:
         raise HTTPException(status_code=409, detail="Un compte existe déjà avec cet e-mail")
+    # ADMIN and MANAGER users have no team
+    team = None if body.role in ("ADMIN", "MANAGER") else body.team
     password_hash = _pwd_ctx.hash(body.password)
     try:
-        user_data = UserCreate(username=body.name, email=body.email, password=body.password, team=body.team)
+        user_data = UserCreate(username=body.name, email=body.email, password=body.password, team=team)
     except ValidationError as exc:
         raise HTTPException(status_code=422, detail=exc.errors()) from exc
     new_user = await db_create_user(user_data, password_hash, role=body.role)
-    await _log_audit("user_created", user, "user", body.email, {"role": body.role, "team": body.team})
-    return {"id": new_user.id, "email": new_user.email, "name": new_user.username, "team": new_user.team or "", "role": new_user.role, "is_active": new_user.is_active}
+    await _log_audit("user_created", user, "user", body.email, {"role": body.role, "team": team})
+
+    notification_email_sent = False
+    notification_error = None
+    try:
+        _send_account_created_email(
+            name=body.name,
+            email=body.email,
+            team=team,
+            role=body.role,
+            password=body.password,
+            created_by=user.get("sub", "admin"),
+        )
+        notification_email_sent = True
+    except Exception as exc:
+        notification_error = str(exc)
+        print(f"[WARN] Account created email failed for {body.email}: {exc}")
+
+    return {
+        "id": new_user.id,
+        "email": new_user.email,
+        "name": new_user.username,
+        "team": new_user.team or "",
+        "role": new_user.role,
+        "is_active": new_user.is_active,
+        "notification_email_sent": notification_email_sent,
+        "notification_error": notification_error,
+    }
 
 
 @app.put("/admin/users/{email}")
@@ -710,6 +1082,10 @@ async def admin_update_user(email: str, body: AdminUpdateUserRequest, user: dict
     if body.role is not None:
         changes["role"] = {"from": db_user.role, "to": body.role}
         update_fields["role"] = body.role
+        # ADMIN and MANAGER users have no team
+        if body.role in ("ADMIN", "MANAGER"):
+            update_fields["team"] = None
+            changes["team"] = None
     if body.is_active is not None:
         update_fields["is_active"] = body.is_active
         changes["is_active"] = body.is_active
@@ -1711,14 +2087,51 @@ async def eval_history_detail(run_id: str, _user: dict = Depends(_require_role("
 # DASHBOARD STATS ENDPOINT
 # ─────────────────────────────────────────────
 
+@app.get("/dashboard/users")
+async def dashboard_users(_user: dict = Depends(_verify_token)):
+    """Return selectable users based on role hierarchy visibility."""
+    from motor.motor_asyncio import AsyncIOMotorClient
+    client = AsyncIOMotorClient(os.getenv("MONGODB_URL", "mongodb://localhost:27017"))
+    db = client[os.getenv("MONGODB_DB", "soprahr_rag")]
+    users_col = db["users"]
+
+    try:
+        role = _user.get("role", "CONSULTANT")
+        email = _user.get("sub", "")
+        actor_doc = await users_col.find_one({"email": email})
+        actor_team = (actor_doc or {}).get("team")
+
+        if role == "CONSULTANT":
+            docs = [actor_doc] if actor_doc else []
+        elif role == "ADMIN":
+            docs = await users_col.find({"is_active": True}).sort("username", 1).to_list(1000)
+        else:
+            docs = await users_col.find({**_subordinate_user_query(role, actor_team), "is_active": True}).sort("username", 1).to_list(1000)
+
+        return [
+            {
+                "id": str(d.get("_id")),
+                "email": d.get("email", ""),
+                "name": d.get("username") or d.get("name") or d.get("email", ""),
+                "team": d.get("team") or "",
+                "role": d.get("role") or "CONSULTANT",
+            }
+            for d in docs
+            if d
+        ]
+    finally:
+        client.close()
+
+
 @app.get("/dashboard/stats")
-async def dashboard_stats(scope: Optional[str] = None, team_filter: Optional[str] = None, window: Optional[int] = None, _user: dict = Depends(_verify_token)):
+async def dashboard_stats(scope: Optional[str] = None, team_filter: Optional[str] = None, user_filter: Optional[str] = None, window: Optional[int] = None, _user: dict = Depends(_verify_token)):
     """Return aggregated dashboard statistics from MongoDB, scoped by role.
 
     Query params:
       scope       — 'me' forces personal view regardless of role
       team_filter — 'DSN' | 'Appli' | 'Outils' narrows results to that RAG team
-      window      — number of days for time-windowed stats (default 14)
+    user_filter — user id or email for single-user drilldown (role-limited)
+    window      — number of days for time-windowed stats (default 14)
     """
     from motor.motor_asyncio import AsyncIOMotorClient
     from datetime import timedelta
@@ -1737,32 +2150,59 @@ async def dashboard_stats(scope: Optional[str] = None, team_filter: Optional[str
         scope_mode = (scope or "").strip().lower()
         days = max(1, min(int(window or 14), 90))
 
-        # ── Validate optional team filter
-        tf = (team_filter or "").strip()
-        team_extra: dict = {}
-        if tf and tf in VALID_TEAMS_FILTER:
-            team_extra = {"filters_applied.team": tf}
-
-        # ── Build scope filter based on role (or explicit scope=me)
+        # ── Build scope filter based on role hierarchy (or explicit scope=me)
         scope_filter: dict = {}
         user_doc = await users_col.find_one({"email": email})
         user_id = str(user_doc["_id"]) if user_doc else str(uuid4())
+        user_team = (user_doc or {}).get("team")
+        visible_user_ids: list[str] = []
+
+        # ── Validate optional team filter (TEAM_LEAD is always pinned to own team)
+        tf = (team_filter or "").strip()
+        team_extra: dict = {}
+        if role == "TEAM_LEAD" and user_team in VALID_TEAMS_FILTER:
+            team_extra = {"filters_applied.team": user_team}
+        elif tf and tf in VALID_TEAMS_FILTER:
+            team_extra = {"filters_applied.team": tf}
 
         if scope_mode == "me":
             scope_filter = {"user_id": user_id}
+            visible_user_ids = [user_id]
         elif role == "CONSULTANT":
             scope_filter = {"user_id": user_id}
-        elif role == "TEAM_LEAD":
-            users_json = _load_users()
-            user_team = users_json.get(email, {}).get("team", "DSN")
-            team_user_ids = []
-            async for u in users_col.find({"team": user_team}):
-                team_user_ids.append(str(u["_id"]))
-            if team_user_ids:
-                scope_filter = {"user_id": {"$in": team_user_ids}}
+            visible_user_ids = [user_id]
+        elif role == "ADMIN":
+            scope_filter = {}
+            visible_user_ids = [str(u["_id"]) async for u in users_col.find({}, {"_id": 1})]
+        else:
+            subordinate_query = _subordinate_user_query(role, user_team)
+            visible_user_ids = [str(u["_id"]) async for u in users_col.find(subordinate_query, {"_id": 1})]
+            if visible_user_ids:
+                scope_filter = {"user_id": {"$in": visible_user_ids}}
             else:
                 scope_filter = {"user_id": "__none__"}
-        # ADMIN and MANAGER see everything (scope_filter stays {})
+
+        # Optional single-user drilldown, constrained to visible users
+        uf = (user_filter or "").strip()
+        if uf:
+            selected_user_id: Optional[str] = None
+            if "@" in uf:
+                target = await users_col.find_one({"email": uf.lower()}, {"_id": 1})
+                selected_user_id = str(target["_id"]) if target else None
+            else:
+                try:
+                    target = await users_col.find_one({"_id": ObjectId(uf)}, {"_id": 1})
+                    selected_user_id = str(target["_id"]) if target else None
+                except Exception:
+                    selected_user_id = None
+
+            if not selected_user_id:
+                raise HTTPException(status_code=404, detail="Utilisateur filtre introuvable")
+
+            if role != "ADMIN" and selected_user_id not in visible_user_ids:
+                raise HTTPException(status_code=403, detail="Accès refusé sur cet utilisateur")
+
+            scope_filter = {"user_id": selected_user_id}
 
         # Merged filter used for all aggregations
         base_filter = {**scope_filter, **team_extra}
@@ -1777,14 +2217,12 @@ async def dashboard_stats(scope: Optional[str] = None, team_filter: Optional[str
         active_users = len(active_docs)
 
         # ── Total registered users
-        if role in ("ADMIN", "MANAGER"):
-            total_users = await users_col.count_documents({})
-        elif role == "TEAM_LEAD":
-            users_json = _load_users()
-            user_team = users_json.get(email, {}).get("team", "DSN")
-            total_users = await users_col.count_documents({"team": user_team})
-        else:
+        if role == "CONSULTANT" or scope_mode == "me":
             total_users = 1
+        elif role == "ADMIN":
+            total_users = await users_col.count_documents({})
+        else:
+            total_users = await users_col.count_documents(_subordinate_user_query(role, user_team))
 
         # ── Average response time (ms)
         avg_match = {**base_filter, "execution_time_ms": {"$ne": None}}
@@ -1885,14 +2323,16 @@ async def dashboard_stats(scope: Optional[str] = None, team_filter: Optional[str
         # ── Top failed queries (from audit_logs, window-scoped)
         failed_since = datetime.utcnow() - timedelta(days=days)
         failed_match: dict = {"action": "query_failed", "created_at": {"$gte": failed_since}}
-        if role == "CONSULTANT":
+        if role == "CONSULTANT" or scope_mode == "me":
             failed_match["actor_email"] = email
-        elif role == "TEAM_LEAD":
-            users_json = _load_users()
-            user_team = users_json.get(email, {}).get("team", "DSN")
-            team_emails = [e for e, u in users_json.items() if u.get("team") == user_team]
-            if team_emails:
-                failed_match["actor_email"] = {"$in": team_emails}
+        elif role in ("MANAGER", "TEAM_LEAD"):
+            sub_query = _subordinate_user_query(role, user_team)
+            sub_emails = [u.get("email") async for u in users_col.find(sub_query, {"email": 1})]
+            sub_emails = [e for e in sub_emails if e]
+            if sub_emails:
+                failed_match["actor_email"] = {"$in": sub_emails}
+            else:
+                failed_match["actor_email"] = "__none__"
 
         failed_raw = await db["audit_logs"].aggregate([
             {"$match": failed_match},

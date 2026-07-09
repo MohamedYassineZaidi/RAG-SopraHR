@@ -477,6 +477,10 @@ def main() -> None:
                         help="Show agent reasoning steps")
     args = parser.parse_args()
 
+    _VALID_TEAMS = {"DSN", "Appli", "Outils", "all"}
+    if args.team not in _VALID_TEAMS:
+        parser.error(f"--team must be one of {sorted(_VALID_TEAMS)}, got: {args.team!r}")
+
     team = None if args.team.lower() == "all" else args.team
 
     report = evaluate(team, args.samples, args.verbose)
